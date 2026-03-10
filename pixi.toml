@@ -35,6 +35,11 @@ ros-kilted-std-srvs = "*"
 ros-kilted-tf2-ros-py = "*"
 setuptools = ">=71.0.0,<81.0.0"                                                        # required by lerobot==0.4.3
 
+# test packages
+ros-kilted-test-cheatcode = { path = "mystuff/test_cheatcode" }
+ros-kilted-test-wave-node = { path = "mystuff/test_wave_node" }
+
+
 [pypi-dependencies]
 huggingface-hub = { version = "==0.35.3", extras = ["hf-transfer", "cli"] }
 lerobot = "==0.4.3"
