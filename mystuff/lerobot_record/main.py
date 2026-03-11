@@ -14,16 +14,10 @@
 #  limitations under the License.
 #
 
-from .aic_robot_aic_controller import AICRobotAICController, AICRobotAICControllerConfig
-from .aic_teleop import (
-    AICKeyboardEETeleop,
-    AICKeyboardEETeleopConfig,
-    AICKeyboardJointTeleop,
-    AICKeyboardJointTeleopConfig,
-    AICSpaceMouseTeleop,
-    AICSpaceMouseTeleopConfig,
 
-    #new beutiful code
-    AICCheatCodeTeleop,
-    AICCheatCodeTeleopConfig,
-)
+def main():
+    print("Hello from lerobot-robot-aic!")
+
+
+if __name__ == "__main__":
+    main()

@@ -38,6 +38,8 @@ setuptools = ">=71.0.0,<81.0.0"                                                 
 # test packages
 ros-kilted-test-cheatcode = { path = "mystuff/test_cheatcode" }
 ros-kilted-test-wave-node = { path = "mystuff/test_wave_node" }
+ros-kilted-lerobot-record = { path = "mystuff/lerobot_record" }
+scipy = ">=1.17.1,<2"
 
 
 [pypi-dependencies]
