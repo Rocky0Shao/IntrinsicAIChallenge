@@ -337,28 +337,39 @@ class AICSpaceMouseTeleop(Teleoperator):
             self._device.close()
         self._is_connected = False
         pass
-
 # ==============================================================================
 # START OF NEW ADDITION: AICCheatCodeTeleop
 # ==============================================================================
-import time
 import numpy as np
+from dataclasses import dataclass
+from typing import Any, cast
+from threading import Thread
+
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
 from scipy.spatial.transform import Rotation as R
 from tf2_ros import Buffer, TransformListener
 from transforms3d._gohlketransforms import quaternion_multiply
 
+# Assuming these are imported elsewhere in your file based on your snippets:
+# from lerobot.common.robot_devices.teleoperation.utils import Teleoperator, TeleoperatorConfig
+# from lerobot.common.robot_devices.utils import DeviceAlreadyConnectedError, DeviceNotConnectedError
+# from lerobot.common.robot_devices.control.utils import MotionUpdateActionDict
+
 @TeleoperatorConfig.register_subclass("aic_cheatcode")
 @dataclass(kw_only=True)
 class AICCheatCodeTeleopConfig(TeleoperatorConfig):
-    # Proportional gains for the velocity controller
+    # Proportional-Integral gains for the velocity controller
     kp_linear: float = 1.0
+    ki_linear: float = 0.15  # Added to fix steady-state error (Zeno's paradox)
+    max_integrator_windup: float = 0.05
     kp_angular: float = 1.5
+    
     # Max velocity clamping to keep demonstrations smooth and safe
     max_linear_vel: float = 0.1
     max_angular_vel: float = 0.5
     
     # --- Task Variables (Override via command line) ---
-    # Defaulting to Trial 1 values:
     task_cable_name: str = "cable_0"
     task_plug_name: str = "sfp_tip"
     task_module_name: str = "nic_card_mount_0"
@@ -374,7 +385,10 @@ class AICCheatCodeTeleop(Teleoperator):
         # State machine variables
         self.phase = "INIT"  # INIT -> APPROACH -> INSERT -> DONE
         self.z_offset = 0.2
-        self.start_time = 0.0
+        self.start_time = 0.0  # Must be 0.0 here, _node doesn't exist yet!
+        
+        # Integrator for the PI controller
+        self._lin_err_integrator = np.zeros(3)
         
         self._current_actions: MotionUpdateActionDict = {
             "linear.x": 0.0, "linear.y": 0.0, "linear.z": 0.0,
@@ -415,6 +429,7 @@ class AICCheatCodeTeleop(Teleoperator):
         self._executor_thread.start()
         
         self._is_connected = True
+        print("This is v9!!!")
         print(f"CheatCode Teleop connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
 
     @property
@@ -447,19 +462,22 @@ class AICCheatCodeTeleop(Teleoperator):
         plug_tf = self._get_transform("base_link", cable_tip_frame)
         gripper_tf = self._get_transform("base_link", "gripper/tcp")
 
-        # If we are missing TFs, output 0 velocity
+        # If we are missing TFs, output 0 velocity (Runaway robot fix)
         if not port_tf or not plug_tf or not gripper_tf:
             if self.phase == "INIT":
                 print("Waiting for ground truth TFs...", end="\r")
+            else:
+                for key in self._current_actions:
+                    self._current_actions[key] = 0.0
             return cast(dict, self._current_actions)
 
         # Transition out of INIT once TFs are found
         if self.phase == "INIT":
             print("\nTFs found! Starting APPROACH phase.")
             self.phase = "APPROACH"
-            self.start_time = time.time()
+            self.start_time = self._node.get_clock().now().nanoseconds / 1e9 # Fixed to use ROS time
 
-        # 3. Calculate target orientation (same math as original CheatCode)
+        # 3. Calculate target orientation
         q_port = (
             port_tf.transform.rotation.w, port_tf.transform.rotation.x,
             port_tf.transform.rotation.y, port_tf.transform.rotation.z
@@ -498,55 +516,61 @@ class AICCheatCodeTeleop(Teleoperator):
         ])
 
         # 5. State Machine Logic
-        elapsed = time.time() - self.start_time
+        current_time = self._node.get_clock().now().nanoseconds / 1e9
+        elapsed = current_time - self.start_time
         dist_to_target = np.linalg.norm(target_pos - gripper_pos)
 
         if self.phase == "APPROACH":
-            # Hover 20cm above the port. Wait until we are close.
             if dist_to_target < 0.01 and elapsed > 2.0:
                 print("Hover position reached. Starting INSERT phase.")
                 self.phase = "INSERT"
-                self.start_time = time.time()
+                self.start_time = current_time
+                self._lin_err_integrator = np.zeros(3) 
                 
         elif self.phase == "INSERT":
-            # Slowly lower the z_offset over time
-            insert_elapsed = time.time() - self.start_time
-            # Lower 1.5cm below port surface (-0.015) over roughly 3 seconds
+            insert_elapsed = current_time - self.start_time
             self.z_offset = max(-0.015, 0.2 - (0.07 * insert_elapsed))
             
-            if self.z_offset <= -0.015 and dist_to_target < 0.005:
+            # FIX: Remove dist_to_target requirement. The robot physically hits 
+            # the port before reaching -1.5cm. Just rely on the timeout/offset!
+            if self.z_offset <= -0.015:
                 print("Insertion complete. DONE phase.")
                 self.phase = "DONE"
 
         elif self.phase == "DONE":
-            # Zero out actions and hold
             for key in self._current_actions:
                 self._current_actions[key] = 0.0
             return cast(dict, self._current_actions)
 
-        # 6. Proportional Velocity Controller
-        # Linear Velocity
+        # 6. Proportional-Integral (PI) Velocity Controller (World Frame)
         lin_err = target_pos - gripper_pos
-        v_linear = np.clip(self.config.kp_linear * lin_err, -self.config.max_linear_vel, self.config.max_linear_vel)
+        self._lin_err_integrator = np.clip(
+            self._lin_err_integrator + lin_err,
+            -self.config.max_integrator_windup,
+            self.config.max_integrator_windup
+        )
+        
+        v_linear_world = (self.config.kp_linear * lin_err) + (self.config.ki_linear * self._lin_err_integrator)
+        v_linear_world = np.clip(v_linear_world, -self.config.max_linear_vel, self.config.max_linear_vel)
 
-        # Angular Velocity using scipy Rotation
-        # scipy uses [x, y, z, w] format, whereas transforms3d uses [w, x, y, z]
         r_current = R.from_quat([q_gripper[1], q_gripper[2], q_gripper[3], q_gripper[0]])
         r_target = R.from_quat([q_gripper_target[1], q_gripper_target[2], q_gripper_target[3], q_gripper_target[0]])
         
-        # Rotation vector represents the axis of rotation scaled by the angle
         r_error = r_target * r_current.inv()
-        rot_vec = r_error.as_rotvec() 
-        v_angular = np.clip(self.config.kp_angular * rot_vec, -self.config.max_angular_vel, self.config.max_angular_vel)
+        v_angular_world = np.clip(self.config.kp_angular * r_error.as_rotvec(), -self.config.max_angular_vel, self.config.max_angular_vel)
 
-        # 7. Map to LeRobot action dict
+        # FIX: Transform World-Frame velocities into TCP-Frame velocities
+        v_linear_tcp = r_current.inv().apply(v_linear_world)
+        v_angular_tcp = r_current.inv().apply(v_angular_world)
+
+        # 7. Map to LeRobot action dict using the TCP-Frame velocities
         self._current_actions = {
-            "linear.x": float(v_linear[0]),
-            "linear.y": float(v_linear[1]),
-            "linear.z": float(v_linear[2]),
-            "angular.x": float(v_angular[0]),
-            "angular.y": float(v_angular[1]),
-            "angular.z": float(v_angular[2]),
+            "linear.x": float(v_linear_tcp[0]),
+            "linear.y": float(v_linear_tcp[1]),
+            "linear.z": float(v_linear_tcp[2]),
+            "angular.x": float(v_angular_tcp[0]),
+            "angular.y": float(v_angular_tcp[1]),
+            "angular.z": float(v_angular_tcp[2]),
         }
 
         return cast(dict, self._current_actions)
