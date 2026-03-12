@@ -1,0 +1,467 @@
+Crocky@rocky:~/ws_aic/src/aic$ pixi run ros2 topic echo --once /scoring/tf
+transforms:
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/sfp_tip_link
+  transform:
+    translation:
+      x: 0.058055877016070734
+      y: -0.4419229475349561
+      z: -0.2279379023448529
+    rotation:
+      x: -0.13950418506739207
+      y: -0.6687865059038921
+      z: -0.024032125635114976
+      w: 0.7298532429595449
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/sc_tip_link
+  transform:
+    translation:
+      x: -0.03203810210905528
+      y: -0.025459259228283737
+      z: -0.04875167787464352
+    rotation:
+      x: 0.9366517785402747
+      y: 0.07516390942193718
+      z: -0.28399828105320835
+      w: 0.1907324265204322
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/cable_connection_0
+  transform:
+    translation:
+      x: 2.3179043684429246e-08
+      y: 9.461578515113089e-08
+      z: -1.6302405581036794e-07
+    rotation:
+      x: -0.6681104268311964
+      y: -0.4592717287946678
+      z: -0.19337807028113732
+      w: 0.552542175904942
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_20
+  transform:
+    translation:
+      x: 0.18133371928712366
+      y: -0.4715059005336574
+      z: -0.23620943581888465
+    rotation:
+      x: 0.5553658129590875
+      y: 0.40259960652599547
+      z: -0.4804295597081969
+      w: -0.5465068792814225
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_19
+  transform:
+    translation:
+      x: 0.22830354447483991
+      y: -0.4811063817623171
+      z: -0.23827717330014853
+    rotation:
+      x: 0.5345371934030954
+      y: 0.44796026933761396
+      z: -0.4575286914359379
+      w: -0.5516059215993188
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_17
+  transform:
+    translation:
+      x: 0.3218784966355141
+      y: -0.4773031074829982
+      z: -0.24768930060447514
+    rotation:
+      x: -0.2788283264258674
+      y: -0.5700170807256297
+      z: 0.5547721676614074
+      w: 0.5381106484872138
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_16
+  transform:
+    translation:
+      x: 0.358439603947214
+      y: -0.4516319855609667
+      z: -0.259793995579755
+    rotation:
+      x: -0.033155263127339796
+      y: -0.586565818745328
+      z: 0.6552796619818867
+      w: 0.4748157317355905
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_15
+  transform:
+    translation:
+      x: 0.37409023747784126
+      y: -0.4113566935697807
+      z: -0.27526497752243695
+    rotation:
+      x: 0.2245844461708212
+      y: -0.5311448635566377
+      z: 0.7339033758262561
+      w: 0.3589328651567106
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_14
+  transform:
+    translation:
+      x: 0.3643854143057413
+      y: -0.3683523011038169
+      z: -0.28955463541954995
+    rotation:
+      x: 0.4229851734219709
+      y: -0.43685462686635207
+      z: 0.7635457598601663
+      w: 0.21734626613807917
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_13
+  transform:
+    translation:
+      x: 0.33568147497930495
+      y: -0.3322862769823187
+      z: -0.2998028938073254
+    rotation:
+      x: 0.5313957418616448
+      y: -0.36655120509504735
+      z: 0.7583791828815875
+      w: 0.09011018756232722
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_12
+  transform:
+    translation:
+      x: 0.2976853020780226
+      y: -0.303758088059113
+      z: -0.3044270332331811
+    rotation:
+      x: -0.58373053607823
+      y: 0.3823509556992491
+      z: -0.716226732514333
+      w: 0.00925034574486766
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: aic_world
+  child_frame_id: cable_0
+  transform:
+    translation:
+      x: 0.17325742542743683
+      y: 0.025086048990488052
+      z: 1.5063070058822632
+    rotation:
+      x: 0.1572777750145302
+      y: 0.07084446311705621
+      z: 0.6031468555439631
+      w: 0.7787545307970581
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/lc_plug_link
+  transform:
+    translation:
+      x: 0.11821503250513449
+      y: -0.4565532751319094
+      z: -0.23206602492405848
+    rotation:
+      x: 0.4174388358123147
+      y: -0.4898958949583438
+      z: 0.45590860946416406
+      w: 0.6147309357779328
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_3
+  transform:
+    translation:
+      x: 0.039460440606059244
+      y: -0.05950203279577315
+      z: -0.09572251449926172
+    rotation:
+      x: 0.09247900695055261
+      y: 0.9391453884626084
+      z: -0.27603047660607744
+      w: 0.1823754374305643
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_18
+  transform:
+    translation:
+      x: 0.2758172917174167
+      y: -0.4853508256928416
+      z: -0.2409744781871077
+    rotation:
+      x: 0.44384406514965385
+      y: 0.5103183209807176
+      z: -0.4850345748424996
+      w: -0.554363704784098
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/cable_end_0
+  transform:
+    translation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+    rotation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      w: 1.0
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/sc_plug_link
+  transform:
+    translation:
+      x: -0.02617410856172747
+      y: -0.020799344853268897
+      z: -0.03982847956009827
+    rotation:
+      x: 0.4592725581605496
+      y: -0.6681098293190485
+      z: -0.5525418866221329
+      w: -0.19337878429306052
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_11
+  transform:
+    translation:
+      x: 0.25729503912557755
+      y: -0.2781691480874248
+      z: -0.3021247677349266
+    rotation:
+      x: -0.5791762287106448
+      y: 0.47495910118572016
+      z: -0.657425902001096
+      w: 0.0822180321811106
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_1
+  transform:
+    translation:
+      x: 0.010354050771277934
+      y: -0.01056744084164235
+      z: -0.0188980607740723
+    rotation:
+      x: 0.1613873014604283
+      y: 0.9314806633491624
+      z: -0.19050704539775454
+      w: 0.2645845383221747
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_2
+  transform:
+    translation:
+      x: 0.02658644386266773
+      y: -0.0336920538667238
+      z: -0.05738606006307534
+    rotation:
+      x: 0.14980927416472295
+      y: 0.9411058259117075
+      z: -0.25090456681931406
+      w: 0.17007071608638188
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_4
+  transform:
+    translation:
+      x: 0.055201836095247425
+      y: -0.08604822442199023
+      z: -0.13243562684336108
+    rotation:
+      x: 0.029268557282307206
+      y: 0.934584872873055
+      z: -0.289941244999523
+      w: 0.2040305421971119
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/sfp_module_link
+  transform:
+    translation:
+      x: 0.08098518597594345
+      y: -0.44749915317738254
+      z: -0.22951126198622007
+    rotation:
+      x: -0.6147297718961349
+      y: -0.4559088869176346
+      z: -0.48989709184845487
+      w: 0.4174388816968576
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_5
+  transform:
+    translation:
+      x: 0.07428964570689717
+      y: -0.11276345109926378
+      z: -0.1673997938444296
+    rotation:
+      x: -0.040266801853306056
+      y: 0.9233021555468783
+      z: -0.3124259754372193
+      w: 0.2197309786809436
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_6
+  transform:
+    translation:
+      x: 0.09646971193718429
+      y: -0.1398868128482366
+      z: -0.2001493303304993
+    rotation:
+      x: -0.12334522071056325
+      y: 0.9016340354763495
+      z: -0.3475094230510424
+      w: 0.22600708143985163
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_7
+  transform:
+    translation:
+      x: 0.1217563248756594
+      y: -0.1676095718082675
+      z: -0.22999323061073018
+    rotation:
+      x: 0.22343799494688454
+      y: -0.8623552955889665
+      z: 0.3962906879208377
+      w: -0.22219924761454019
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_8
+  transform:
+    translation:
+      x: 0.15037793040744213
+      y: -0.1958628463862935
+      z: -0.2560524729458209
+    rotation:
+      x: 0.33311115983328127
+      y: -0.7989701341378965
+      z: 0.45667834760283177
+      w: -0.20525253495410228
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_9
+  transform:
+    translation:
+      x: 0.18252278105764486
+      y: -0.22427631886758342
+      z: -0.2773425455088807
+    rotation:
+      x: 0.43689635543122907
+      y: -0.7094639405541799
+      z: 0.5244242554826559
+      w: -0.17539014691682203
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/cable_connection_1
+  transform:
+    translation:
+      x: 0.15796558967762914
+      y: -0.46622055509100535
+      z: -0.2347939620249475
+    rotation:
+      x: 0.05123261571047727
+      y: 0.6415827283980555
+      z: -0.7570561384852529
+      w: -0.11230669012044645
+- header:
+    stamp:
+      sec: 24
+      nanosec: 552000000
+    frame_id: cable_0
+  child_frame_id: cable_0/link_10
+  transform:
+    translation:
+      x: 0.21831806762931982
+      y: -0.25196172549231777
+      z: -0.2929305204032051
+    rotation:
+      x: -0.5225934141947906
+      y: 0.5978397047203634
+      z: -0.5918194152419747
+      w: 0.13868489140657606
+---

@@ -2,7 +2,7 @@
 
 # Prompt the user for the trial number
 read -p "Which trial do you want to teleop? (1, 2, or 3): " trial_num
-
+pixi run ros2 service call /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger
 # Base teleop command using your repo ID and standard flags
 BASE_CMD="pixi run lerobot-teleoperate \
   --robot.type=aic_controller --robot.id=aic \
@@ -31,7 +31,7 @@ case $trial_num in
   3)
     echo "Starting LeRobot teleop for Trial 3..."
     eval "$BASE_CMD \
-      --teleop.task_cable_name=cable_1 \
+      --teleop.task_cable_name=cable_0 \
       --teleop.task_plug_name=sc_tip \
       --teleop.task_module_name=sc_port_1 \
       --teleop.task_port_name=sc_port_base"
