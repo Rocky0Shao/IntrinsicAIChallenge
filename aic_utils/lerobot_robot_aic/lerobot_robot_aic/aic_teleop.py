@@ -429,7 +429,7 @@ class AICCheatCodeTeleop(Teleoperator):
         self._executor_thread.start()
         
         self._is_connected = True
-        print("This is v9!!!")
+        print("This is v10!!!")
         print(f"CheatCode Teleop connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
 
     @property
@@ -529,11 +529,14 @@ class AICCheatCodeTeleop(Teleoperator):
                 
         elif self.phase == "INSERT":
             insert_elapsed = current_time - self.start_time
+            # Slowly lower the target z_offset.
             self.z_offset = max(-0.015, 0.2 - (0.07 * insert_elapsed))
             
-            # FIX: Remove dist_to_target requirement. The robot physically hits 
-            # the port before reaching -1.5cm. Just rely on the timeout/offset!
-            if self.z_offset <= -0.015:
+            # Check if the target has finished descending AND the physical
+            # gripper has reached the target (or is physically blocked by the port)
+            z_error = abs(target_pos[2] - gripper_pos[2])
+            
+            if self.z_offset <= -0.015 and z_error < 0.005:
                 print("Insertion complete. DONE phase.")
                 self.phase = "DONE"
 
