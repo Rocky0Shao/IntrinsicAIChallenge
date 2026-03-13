@@ -426,14 +426,72 @@ class AICCheatCodeTeleop(Teleoperator):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self._node)
 
+        # Force feedback state
+        self._latest_force_mag = 0.0
+        self._force_exceed_start_time = None
+        self._has_tare = False
+        self._tare_offset = np.zeros(3)
+
+        # Import Observation message here to avoid circular dependencies if any
+        from aic_model_interfaces.msg import Observation
+        
+        # Subscribe to observations to get wrist wrench and tare offset
+        self._obs_sub = self._node.create_subscription(
+            Observation,
+            "/observations",
+            self._obs_callback,
+            rclpy.qos.qos_profile_sensor_data
+        )
+        if self._obs_sub is not None:
+            print("Observation subscriber created successfully.")
+        else:
+            print("Failed to create observation subscriber.")
+
+
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
         self._executor_thread = Thread(target=self._executor.spin, daemon=True)
         self._executor_thread.start()
         
         self._is_connected = True
-        print("This is v10!!!")
         print(f"CheatCode Teleop connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
+
+    def _obs_callback(self, msg):
+        """Processes the observation message to calculate world-frame insertion force."""
+        # 1. Capture tare offset from controller state
+        tare = msg.controller_state.fts_tare_offset.wrench.force
+        self._tare_offset = np.array([tare.x, tare.y, tare.z])
+        self._has_tare = True
+
+        # 2. Get raw wrist wrench
+        raw_force = msg.wrist_wrench.wrench.force
+        raw_force_vec = np.array([raw_force.x, raw_force.y, raw_force.z])
+
+        # 3. Apply tare
+        tared_force = raw_force_vec - self._tare_offset
+
+        # 4. Transform force to world frame
+        # The wrench is in the sensor frame (typically 'wrist_3_link' or 'tool0')
+        # We need its orientation in the base_link frame to get the true 3D force magnitude correctly? 
+        # Actually, the magnitude of a 3D vector is invariant to pure rotation!
+        # So we don't strictly *need* to transform it if we are just looking at overall magnitude.
+        # But to be robust and allow future Z-axis checks, let's look up the transform.
+        
+        sensor_frame = msg.wrist_wrench.header.frame_id
+        if not sensor_frame:
+            sensor_frame = "gripper/tcp" # Fallback guess if empty
+
+        tf_msg = self._get_transform("base_link", sensor_frame)
+        if tf_msg:
+            q = tf_msg.transform.rotation
+            rot = R.from_quat([q.x, q.y, q.z, q.w])
+            world_force = rot.apply(tared_force)
+            # Magnitude is the same, but now it's in world frame
+            self._latest_force_mag = np.linalg.norm(world_force)
+        else:
+            # Fallback to local magnitude
+            self._latest_force_mag = np.linalg.norm(tared_force)
+
 
     @property
     def is_calibrated(self) -> bool:
@@ -523,13 +581,35 @@ class AICCheatCodeTeleop(Teleoperator):
         elapsed = current_time - self.start_time
         dist_to_target = np.linalg.norm(target_pos - gripper_pos)
 
+        # Force penalty check logic
+        if self.phase == "INSERT":
+            if self._latest_force_mag > 20.0:
+                if self._force_exceed_start_time is None:
+                    self._force_exceed_start_time = current_time
+                elif (current_time - self._force_exceed_start_time) > 0.8:
+                    print(f"\nExcessive force detected ({self._latest_force_mag:.1f}N). Initiating recovery...")
+                    self.phase = "RECOVERY"
+                    self._force_exceed_start_time = None
+                    self.z_offset = 0.2  # Lift back up to hover height
+                    self._lin_err_integrator = np.zeros(3)  # Reset integrator to prevent jerking
+            else:
+                self._force_exceed_start_time = None
+
         if self.phase == "APPROACH":
             if dist_to_target < 0.01 and elapsed > 2.0:
                 print("Hover position reached. Starting INSERT phase.")
                 self.phase = "INSERT"
                 self.start_time = current_time
                 self._lin_err_integrator = np.zeros(3) 
-                
+
+        elif self.phase == "RECOVERY":
+            # Wait until the robot lifts the plug back to the safe z_offset
+            if dist_to_target < 0.01:
+                print("Recovery complete. Restarting APPROACH phase.")
+                self.phase = "APPROACH"
+                self.start_time = current_time
+                self._lin_err_integrator = np.zeros(3)
+
         elif self.phase == "INSERT":
             insert_elapsed = current_time - self.start_time
             # Slowly lower the target z_offset.

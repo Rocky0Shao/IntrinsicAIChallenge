@@ -1,0 +1,1 @@
+ros2 topic echo  /observations | grep -A 14 wrist_wrench
