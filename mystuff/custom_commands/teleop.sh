@@ -8,7 +8,7 @@ BASE_CMD="pixi run lerobot-teleoperate \
   --robot.type=aic_controller --robot.id=aic \
   --teleop.type=aic_cheatcode --teleop.id=aic \
   --robot.teleop_target_mode=cartesian --robot.teleop_frame_id=gripper/tcp \
-  --display_data=false"
+  --display_data=true"
 
 # Execute the command with the correct trial-specific TF frames
 case $trial_num in

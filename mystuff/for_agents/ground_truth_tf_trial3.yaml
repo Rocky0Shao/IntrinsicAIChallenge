@@ -1,4 +1,3 @@
-Crocky@rocky:~/ws_aic/src/aic$ pixi run ros2 topic echo --once /scoring/tf
 transforms:
 - header:
     stamp:
@@ -464,4 +463,3 @@ transforms:
       y: 0.5978397047203634
       z: -0.5918194152419747
       w: 0.13868489140657606
----
