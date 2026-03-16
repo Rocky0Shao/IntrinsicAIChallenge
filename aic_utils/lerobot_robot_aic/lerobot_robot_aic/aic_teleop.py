@@ -33,7 +33,8 @@ from rclpy.executors import SingleThreadedExecutor
 from .aic_robot import arm_joint_names
 from .types import JointMotionUpdateActionDict, MotionUpdateActionDict
 
-
+from rclpy.time import Time
+from rclpy.qos import qos_profile_sensor_data
 @TeleoperatorConfig.register_subclass("aic_keyboard_joint")
 @dataclass
 class AICKeyboardJointTeleopConfig(KeyboardJointTeleopConfig):
@@ -380,7 +381,7 @@ class AICCheatCodeTeleopConfig(TeleoperatorConfig):
     insertion_base_speed: float = 0.02   # Base descent rate during insertion (m/s per tick)
     insertion_depth: float = -0.015      # Target z_offset for full insertion (m)
     retreat_height: float = 0.05         # Height to retreat to on force overload (m)
-    max_retries: int = 10                 # Max recovery attempts before giving up
+    max_retries: int = 10                 # Max recovery attempts before giving up #TODO: Fix termial logging
 
     # Alignment convergence criteria
     align_xy_tolerance: float = 0.003    # XY error tolerance for alignment (m)
@@ -457,7 +458,7 @@ class AICCheatCodeTeleop(Teleoperator):
             Observation,
             "/observations",
             self._obs_callback,
-            rclpy.qos.qos_profile_sensor_data
+            qos_profile_sensor_data
         )
         if self._obs_sub is not None:
             print("Observation subscriber created successfully.")
@@ -489,12 +490,12 @@ class AICCheatCodeTeleop(Teleoperator):
         # 4. Calculate Euclidean force magnitude (rotation-invariant)
         self._latest_force_mag = float(np.linalg.norm(tared_force))
 
-        # Throttled print
-        if not hasattr(self, '_force_print_counter'):
-            self._force_print_counter = 0
-        self._force_print_counter += 1
-        if self._force_print_counter % 10 == 0:
-            print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f}")
+        # # Throttled print
+        # if not hasattr(self, '_force_print_counter'):
+        #     self._force_print_counter = 0
+        # self._force_print_counter += 1
+        # if self._force_print_counter % 10 == 0:
+        print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f}")
 
     @property
     def is_calibrated(self) -> bool:
@@ -509,7 +510,7 @@ class AICCheatCodeTeleop(Teleoperator):
     def _get_transform(self, target_frame: str, source_frame: str):
         """Helper to get transforms without throwing exceptions in the main loop."""
         try:
-            return self._tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            return self._tf_buffer.lookup_transform(target_frame, source_frame, Time())
         except Exception:
             return None
 
