@@ -17,3 +17,4 @@ aic_utils/aic_mujoco/mjcf/*.png
 aic_utils/aic_isaac/aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/aic_task/Intrinsic_assets/
 
 .env
+*.rrd
