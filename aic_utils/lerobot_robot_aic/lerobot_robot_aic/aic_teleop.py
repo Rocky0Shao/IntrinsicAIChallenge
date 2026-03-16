@@ -341,7 +341,7 @@ class AICSpaceMouseTeleop(Teleoperator):
         self._is_connected = False
         pass
 # ==============================================================================
-# START OF NEW ADDITION: AICCheatCodeTeleop
+# START OF NEW ADDITION: AICCheatCodeTeleop (Improved v2)
 # ==============================================================================
 import numpy as np
 from dataclasses import dataclass
@@ -354,24 +354,40 @@ from scipy.spatial.transform import Rotation as R
 from tf2_ros import Buffer, TransformListener
 from transforms3d._gohlketransforms import quaternion_multiply
 
-# Assuming these are imported elsewhere in your file based on your snippets:
-# from lerobot.common.robot_devices.teleoperation.utils import Teleoperator, TeleoperatorConfig
-# from lerobot.common.robot_devices.utils import DeviceAlreadyConnectedError, DeviceNotConnectedError
-# from lerobot.common.robot_devices.control.utils import MotionUpdateActionDict
 
 @TeleoperatorConfig.register_subclass("aic_cheatcode")
 @dataclass(kw_only=True)
 class AICCheatCodeTeleopConfig(TeleoperatorConfig):
     # Proportional-Integral gains for the velocity controller
-    kp_linear: float = 1.0
-    ki_linear: float = 0.15  # Added to fix steady-state error (Zeno's paradox)
+    kp_linear: float = 1.2
+    ki_linear: float = 0.2
     max_integrator_windup: float = 0.05
-    kp_angular: float = 1.5
-    
-    # Max velocity clamping to keep demonstrations smooth and safe
-    max_linear_vel: float = 0.1
+    kp_angular: float = 2.0
+
+    # Max velocity clamping
+    max_linear_vel: float = 0.08
     max_angular_vel: float = 0.5
-    
+
+    # Force-aware insertion parameters
+    force_rampdown_start: float = 5.0    # Start slowing at this force (N)
+    force_rampdown_full: float = 15.0    # Full stop at this force (N)
+    force_retreat_threshold: float = 10.0 # Retreat if above this for too long (N)
+    force_retreat_duration: float = 0.5   # Seconds above retreat threshold before retreating
+
+    # Insertion parameters
+    hover_height: float = 0.05           # Hover height above port for alignment (m)
+    approach_height: float = 0.20        # Initial approach height (m)
+    insertion_base_speed: float = 0.02   # Base descent rate during insertion (m/s per tick)
+    insertion_depth: float = -0.015      # Target z_offset for full insertion (m)
+    retreat_height: float = 0.05         # Height to retreat to on force overload (m)
+    max_retries: int = 10                 # Max recovery attempts before giving up
+
+    # Alignment convergence criteria
+    align_xy_tolerance: float = 0.003    # XY error tolerance for alignment (m)
+    align_angular_tolerance: float = 0.05 # Angular error tolerance (rad)
+    align_timeout: float = 5.0           # Max time in ALIGN phase (s)
+    align_min_dwell: float = 1.0         # Minimum dwell time in ALIGN (s)
+
     # --- Task Variables (Override via command line) ---
     task_cable_name: str = "cable_0"
     task_plug_name: str = "sfp_tip"
@@ -384,15 +400,16 @@ class AICCheatCodeTeleop(Teleoperator):
         super().__init__(config)
         self.config = config
         self._is_connected = False
-        
+
         # State machine variables
-        self.phase = "INIT"  # INIT -> APPROACH -> INSERT -> DONE
-        self.z_offset = 0.2
-        self.start_time = 0.0  # Must be 0.0 here, _node doesn't exist yet!
-        
+        self.phase = "INIT"  # INIT -> APPROACH -> ALIGN -> INSERT -> DONE
+        self.z_offset = config.approach_height
+        self.start_time = 0.0
+        self._retry_count = 0
+
         # Integrator for the PI controller
         self._lin_err_integrator = np.zeros(3)
-        
+
         self._current_actions: MotionUpdateActionDict = {
             "linear.x": 0.0, "linear.y": 0.0, "linear.z": 0.0,
             "angular.x": 0.0, "angular.y": 0.0, "angular.z": 0.0,
@@ -432,9 +449,9 @@ class AICCheatCodeTeleop(Teleoperator):
         self._has_tare = False
         self._tare_offset = np.zeros(3)
 
-        # Import Observation message here to avoid circular dependencies if any
+        # Import Observation message here to avoid circular dependencies
         from aic_model_interfaces.msg import Observation
-        
+
         # Subscribe to observations to get wrist wrench and tare offset
         self._obs_sub = self._node.create_subscription(
             Observation,
@@ -447,17 +464,16 @@ class AICCheatCodeTeleop(Teleoperator):
         else:
             print("Failed to create observation subscriber.")
 
-
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
         self._executor_thread = Thread(target=self._executor.spin, daemon=True)
         self._executor_thread.start()
-        
+
         self._is_connected = True
-        print(f"CheatCode Teleop connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
+        print(f"\n\nCheatCode Teleop v2 connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
 
     def _obs_callback(self, msg):
-        """Processes the observation message to calculate world-frame insertion force."""
+        """Processes the observation message to calculate insertion force magnitude."""
         # 1. Capture tare offset from controller state
         tare = msg.controller_state.fts_tare_offset.wrench.force
         self._tare_offset = np.array([tare.x, tare.y, tare.z])
@@ -470,28 +486,15 @@ class AICCheatCodeTeleop(Teleoperator):
         # 3. Apply tare
         tared_force = raw_force_vec - self._tare_offset
 
-        # 4. Transform force to world frame
-        # The wrench is in the sensor frame (typically 'wrist_3_link' or 'tool0')
-        # We need its orientation in the base_link frame to get the true 3D force magnitude correctly? 
-        # Actually, the magnitude of a 3D vector is invariant to pure rotation!
-        # So we don't strictly *need* to transform it if we are just looking at overall magnitude.
-        # But to be robust and allow future Z-axis checks, let's look up the transform.
-        
-        sensor_frame = msg.wrist_wrench.header.frame_id
-        if not sensor_frame:
-            sensor_frame = "gripper/tcp" # Fallback guess if empty
+        # 4. Calculate Euclidean force magnitude (rotation-invariant)
+        self._latest_force_mag = float(np.linalg.norm(tared_force))
 
-        tf_msg = self._get_transform("base_link", sensor_frame)
-        if tf_msg:
-            q = tf_msg.transform.rotation
-            rot = R.from_quat([q.x, q.y, q.z, q.w])
-            world_force = rot.apply(tared_force)
-            # Magnitude is the same, but now it's in world frame
-            self._latest_force_mag = np.linalg.norm(world_force)
-        else:
-            # Fallback to local magnitude
-            self._latest_force_mag = np.linalg.norm(tared_force)
-
+        # Throttled print
+        if not hasattr(self, '_force_print_counter'):
+            self._force_print_counter = 0
+        self._force_print_counter += 1
+        if self._force_print_counter % 10 == 0:
+            print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f}")
 
     @property
     def is_calibrated(self) -> bool:
@@ -510,20 +513,33 @@ class AICCheatCodeTeleop(Teleoperator):
         except Exception:
             return None
 
+    def _compute_force_speed_multiplier(self) -> float:
+        """Returns a speed multiplier [0.0, 1.0] based on sensed force.
+        Linearly ramps from 1.0 at force_rampdown_start to 0.0 at force_rampdown_full."""
+        f = self._latest_force_mag
+        if f <= self.config.force_rampdown_start:
+            return 1.0
+        elif f >= self.config.force_rampdown_full:
+            return 0.0
+        else:
+            return 1.0 - (f - self.config.force_rampdown_start) / (self.config.force_rampdown_full - self.config.force_rampdown_start)
+
     def get_action(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError()
 
+        cfg = self.config
+
         # 1. Define required TF frames from config
-        port_frame = f"task_board/{self.config.task_module_name}/{self.config.task_port_name}_link"
-        cable_tip_frame = f"{self.config.task_cable_name}/{self.config.task_plug_name}_link"
-        
+        port_frame = f"task_board/{cfg.task_module_name}/{cfg.task_port_name}_link"
+        cable_tip_frame = f"{cfg.task_cable_name}/{cfg.task_plug_name}_link"
+
         # 2. Look up current transforms
         port_tf = self._get_transform("base_link", port_frame)
         plug_tf = self._get_transform("base_link", cable_tip_frame)
         gripper_tf = self._get_transform("base_link", "gripper/tcp")
 
-        # If we are missing TFs, output 0 velocity (Runaway robot fix)
+        # If we are missing TFs, output 0 velocity
         if not port_tf or not plug_tf or not gripper_tf:
             if self.phase == "INIT":
                 print("Waiting for ground truth TFs...", end="\r")
@@ -536,27 +552,14 @@ class AICCheatCodeTeleop(Teleoperator):
         if self.phase == "INIT":
             print("\nTFs found! Starting APPROACH phase.")
             self.phase = "APPROACH"
-            self.start_time = self._node.get_clock().now().nanoseconds / 1e9 # Fixed to use ROS time
+            self.z_offset = cfg.approach_height
+            self.start_time = self._node.get_clock().now().nanoseconds / 1e9
+            self._lin_err_integrator = np.zeros(3)
 
-        # 3. Calculate target orientation
-        q_port = (
-            port_tf.transform.rotation.w, port_tf.transform.rotation.x,
-            port_tf.transform.rotation.y, port_tf.transform.rotation.z
-        )
-        q_plug = (
-            plug_tf.transform.rotation.w, plug_tf.transform.rotation.x,
-            plug_tf.transform.rotation.y, plug_tf.transform.rotation.z
-        )
-        q_plug_inv = (-q_plug[0], q_plug[1], q_plug[2], q_plug[3])
-        q_diff = quaternion_multiply(q_port, q_plug_inv)
-        
-        q_gripper = (
-            gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
-            gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z
-        )
-        q_gripper_target = quaternion_multiply(q_diff, q_gripper)
+        current_time = self._node.get_clock().now().nanoseconds / 1e9
+        elapsed = current_time - self.start_time
 
-        # 4. Calculate target position
+        # 3. Extract positions and orientations
         gripper_pos = np.array([
             gripper_tf.transform.translation.x,
             gripper_tf.transform.translation.y,
@@ -567,60 +570,119 @@ class AICCheatCodeTeleop(Teleoperator):
             plug_tf.transform.translation.y,
             plug_tf.transform.translation.z
         ])
-        plug_offset = gripper_pos - plug_pos
-        
-        # Base target is the port position + the offset of how the gripper holds the plug
-        target_pos = np.array([
-            port_tf.transform.translation.x + plug_offset[0],
-            port_tf.transform.translation.y + plug_offset[1],
-            port_tf.transform.translation.z + plug_offset[2] + self.z_offset
+        port_pos = np.array([
+            port_tf.transform.translation.x,
+            port_tf.transform.translation.y,
+            port_tf.transform.translation.z
         ])
 
-        # 5. State Machine Logic
-        current_time = self._node.get_clock().now().nanoseconds / 1e9
-        elapsed = current_time - self.start_time
+        # Quaternions (w, x, y, z)
+        q_port = (
+            port_tf.transform.rotation.w, port_tf.transform.rotation.x,
+            port_tf.transform.rotation.y, port_tf.transform.rotation.z
+        )
+        q_plug = (
+            plug_tf.transform.rotation.w, plug_tf.transform.rotation.x,
+            plug_tf.transform.rotation.y, plug_tf.transform.rotation.z
+        )
+        q_gripper = (
+            gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
+            gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z
+        )
+
+        # 4. Calculate target orientation (align plug to port)
+        q_plug_inv = (-q_plug[0], q_plug[1], q_plug[2], q_plug[3])
+        q_diff = quaternion_multiply(q_port, q_plug_inv)
+        q_gripper_target = quaternion_multiply(q_diff, q_gripper)
+
+        # 5. Calculate target position
+        plug_offset = gripper_pos - plug_pos  # how gripper holds the plug
+
+        target_pos = np.array([
+            port_pos[0] + plug_offset[0],
+            port_pos[1] + plug_offset[1],
+            port_pos[2] + plug_offset[2] + self.z_offset
+        ])
+
+        # Compute alignment errors
+        xy_error = np.linalg.norm(target_pos[:2] - gripper_pos[:2])
         dist_to_target = np.linalg.norm(target_pos - gripper_pos)
 
-        # Force penalty check logic
-        if self.phase == "INSERT":
-            if self._latest_force_mag > 20.0:
+        # Compute angular error
+        r_current = R.from_quat([q_gripper[1], q_gripper[2], q_gripper[3], q_gripper[0]])
+        r_target = R.from_quat([q_gripper_target[1], q_gripper_target[2], q_gripper_target[3], q_gripper_target[0]])
+        r_error = r_target * r_current.inv()
+        angular_error = float(np.linalg.norm(r_error.as_rotvec()))
+
+        # ========================
+        # 6. State Machine Logic
+        # ========================
+
+        # --- Force safety check (applies during INSERT and ALIGN) ---
+        if self.phase in ("INSERT", "ALIGN"):
+            if self._latest_force_mag > cfg.force_retreat_threshold:
                 if self._force_exceed_start_time is None:
                     self._force_exceed_start_time = current_time
-                elif (current_time - self._force_exceed_start_time) > 0.8:
-                    print(f"\nExcessive force detected ({self._latest_force_mag:.1f}N). Initiating recovery...")
-                    self.phase = "RECOVERY"
-                    self._force_exceed_start_time = None
-                    self.z_offset = 0.2  # Lift back up to hover height
-                    self._lin_err_integrator = np.zeros(3)  # Reset integrator to prevent jerking
+                elif (current_time - self._force_exceed_start_time) > cfg.force_retreat_duration:
+                    self._retry_count += 1
+                    if self._retry_count > cfg.max_retries:
+                        print(f"\nMax retries ({cfg.max_retries}) exceeded. Stopping.")
+                        self.phase = "DONE"
+                    else:
+                        print(f"\nForce retreat triggered ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
+                        self.phase = "RECOVERY"
+                        self._force_exceed_start_time = None
+                        self.z_offset = cfg.retreat_height  # Only retreat to 5cm, not 20cm!
+                        self._lin_err_integrator = np.zeros(3)
+                        self.start_time = current_time
             else:
                 self._force_exceed_start_time = None
 
         if self.phase == "APPROACH":
-            if dist_to_target < 0.01 and elapsed > 2.0:
-                print("Hover position reached. Starting INSERT phase.")
+            # Transition to ALIGN when close to hover position
+            if dist_to_target < 0.01 and elapsed > 1.5:
+                print(f"Hover reached (err={dist_to_target:.4f}m). Entering ALIGN phase.")
+                self.phase = "ALIGN"
+                self.z_offset = cfg.hover_height  # Lower to fine-align height
+                self.start_time = current_time
+                self._lin_err_integrator = np.zeros(3)
+
+        elif self.phase == "ALIGN":
+            align_elapsed = current_time - self.start_time
+            xy_ok = xy_error < cfg.align_xy_tolerance
+            ang_ok = angular_error < cfg.align_angular_tolerance
+            dwell_ok = align_elapsed > cfg.align_min_dwell
+
+            if (xy_ok and ang_ok and dwell_ok) or align_elapsed > cfg.align_timeout:
+                if align_elapsed > cfg.align_timeout:
+                    print(f"ALIGN timeout ({cfg.align_timeout}s). Proceeding (xy={xy_error:.4f}, ang={angular_error:.3f})")
+                else:
+                    print(f"Aligned! (xy={xy_error:.4f}m, ang={angular_error:.3f}rad, dwell={align_elapsed:.1f}s). Starting INSERT.")
                 self.phase = "INSERT"
                 self.start_time = current_time
-                self._lin_err_integrator = np.zeros(3) 
+                self._lin_err_integrator = np.zeros(3)
 
         elif self.phase == "RECOVERY":
-            # Wait until the robot lifts the plug back to the safe z_offset
+            # Wait until robot lifts back near retreat height
             if dist_to_target < 0.01:
-                print("Recovery complete. Restarting APPROACH phase.")
-                self.phase = "APPROACH"
+                print("Recovery complete. Re-entering ALIGN phase.")
+                self.phase = "ALIGN"
                 self.start_time = current_time
                 self._lin_err_integrator = np.zeros(3)
 
         elif self.phase == "INSERT":
-            insert_elapsed = current_time - self.start_time
-            # Slowly lower the target z_offset.
-            self.z_offset = max(-0.015, 0.2 - (0.07 * insert_elapsed))
-            
-            # Check if the target has finished descending AND the physical
-            # gripper has reached the target (or is physically blocked by the port)
+            # Force-proportional descent
+            speed_mult = self._compute_force_speed_multiplier()
+            descent = cfg.insertion_base_speed * speed_mult
+            self.z_offset = max(cfg.insertion_depth, self.z_offset - descent)
+
+            # Recompute target with possibly updated z_offset
+            target_pos[2] = port_pos[2] + plug_offset[2] + self.z_offset
+
+            # Check completion
             z_error = abs(target_pos[2] - gripper_pos[2])
-            
-            if self.z_offset <= -0.015 and z_error < 0.005:
-                print("Insertion complete. DONE phase.")
+            if self.z_offset <= cfg.insertion_depth and z_error < 0.005:
+                print("Insertion complete! DONE.")
                 self.phase = "DONE"
 
         elif self.phase == "DONE":
@@ -628,28 +690,34 @@ class AICCheatCodeTeleop(Teleoperator):
                 self._current_actions[key] = 0.0
             return cast(dict, self._current_actions)
 
-        # 6. Proportional-Integral (PI) Velocity Controller (World Frame)
+        # ========================
+        # 7. PI Velocity Controller (World Frame)
+        # ========================
         lin_err = target_pos - gripper_pos
         self._lin_err_integrator = np.clip(
             self._lin_err_integrator + lin_err,
-            -self.config.max_integrator_windup,
-            self.config.max_integrator_windup
+            -cfg.max_integrator_windup,
+            cfg.max_integrator_windup
         )
-        
-        v_linear_world = (self.config.kp_linear * lin_err) + (self.config.ki_linear * self._lin_err_integrator)
-        v_linear_world = np.clip(v_linear_world, -self.config.max_linear_vel, self.config.max_linear_vel)
 
-        r_current = R.from_quat([q_gripper[1], q_gripper[2], q_gripper[3], q_gripper[0]])
-        r_target = R.from_quat([q_gripper_target[1], q_gripper_target[2], q_gripper_target[3], q_gripper_target[0]])
-        
-        r_error = r_target * r_current.inv()
-        v_angular_world = np.clip(self.config.kp_angular * r_error.as_rotvec(), -self.config.max_angular_vel, self.config.max_angular_vel)
+        v_linear_world = (cfg.kp_linear * lin_err) + (cfg.ki_linear * self._lin_err_integrator)
 
-        # FIX: Transform World-Frame velocities into TCP-Frame velocities
+        # During INSERT, limit max velocity more aggressively for smoothness
+        if self.phase == "INSERT":
+            max_lin = cfg.max_linear_vel * 0.6  # Slower during insertion
+        else:
+            max_lin = cfg.max_linear_vel
+
+        v_linear_world = np.clip(v_linear_world, -max_lin, max_lin)
+
+        # Angular velocity
+        v_angular_world = np.clip(cfg.kp_angular * r_error.as_rotvec(), -cfg.max_angular_vel, cfg.max_angular_vel)
+
+        # 8. Transform World-Frame velocities into TCP-Frame velocities
         v_linear_tcp = r_current.inv().apply(v_linear_world)
         v_angular_tcp = r_current.inv().apply(v_angular_world)
 
-        # 7. Map to LeRobot action dict using the TCP-Frame velocities
+        # 9. Map to LeRobot action dict
         self._current_actions = {
             "linear.x": float(v_linear_tcp[0]),
             "linear.y": float(v_linear_tcp[1]),
