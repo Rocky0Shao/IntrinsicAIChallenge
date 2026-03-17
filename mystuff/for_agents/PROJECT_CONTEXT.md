@@ -72,12 +72,12 @@ Contains 4 teleoperator classes:
 ### AICCheatCodeTeleop Architecture
 
 **Config parameters** (AICCheatCodeTeleopConfig):
-- kp_linear=1.0, ki_linear=0.15, max_integrator_windup=0.05
-- kp_angular=1.5
-- max_linear_vel=0.1, max_angular_vel=0.5
+- kp_linear=1.0, ki_linear=0.2, max_integrator_windup=0.05
+- kp_angular=2.0
+- max_linear_vel=0.06, max_angular_vel=0.5
 - task_cable_name, task_plug_name, task_module_name, task_port_name (set per trial)
 
-**State Machine**: INIT → APPROACH → INSERT → DONE (with RECOVERY on force overload)
+**State Machine**: INIT → APPROACH → ALIGN → INSERT → DONE (with SEARCH on moderate force >17N, RECOVERY as last resort >19N)
 
 **How it works**:
 1. Looks up ground-truth TF frames for port and plug positions
@@ -90,14 +90,21 @@ Contains 4 teleoperator classes:
 - Official CheatCode uses POSITION targets (set_pose_target with MotionUpdate MODE_POSITION)
 - Teleop CheatCode uses VELOCITY targets (MotionUpdate MODE_VELOCITY via LeRobot framework)
 - This means the teleop version must output incremental velocity commands, not absolute poses
+- During INSERT, moderate force (>17N) now triggers SEARCH instead of immediate aggressive recovery
+- SEARCH wiggles in a 5mm radius circle while gently creeping down (~0.002 m/s)
+- If force drops below ~12N during SEARCH, it resumes INSERT (hole likely found)
+- After 3 full circles without success, it falls back to mini-lift RECOVERY
+- Universal DONE detection monitors actual plug TF and can finish successfully from any phase
 
 ### Known Issues with Current Cheatcode Teleop
-1. Insertion descent rate (0.07 m/s) may be too aggressive - causes misalignment under force
-2. XY alignment uses PI controller during approach but integrator resets on phase transitions can cause drift
-3. Force recovery lifts all the way back to 0.2m - very wasteful, adds lots of time
-4. No fine-alignment "dwell" phase at hover height before starting insertion
-5. Recovery phase transition threshold (dist_to_target < 0.2) is very loose
-6. Orientation correction may not fully converge before insertion begins
+1. ✅ Frame-rate dependent descent - FIXED (now uses dt-based time scaling)
+2. ✅ Insertion descent rate - FIXED (0.01 m/s with force-proportional speed control)
+3. ✅ Recovery lifts too high - FIXED (retreat_height=0.03m, with 5s timeout fallback)
+4. ✅ No fine-alignment dwell - FIXED (ALIGN phase with 1s min dwell, 3mm XY + 0.05rad angular tolerance)
+5. ✅ XY overshoot during approach - FIXED (integrator zeroed during APPROACH phase)
+6. NEW: SEARCH phase replaces aggressive recovery - wiggles in 5mm circle at 2 rad/s when force >17N for 0.3s during insertion
+7. Force thresholds tuned for ~14N normal insertion resistance: rampdown starts at 15N, SEARCH at 17N, RECOVERY at 19N (below 20N penalty zone)
+8. DONE detection uses actual plug TF position (universal check across all phases) with 2s dwell confirmation
 
 ## Scoring System (Max 100 per trial, 3 trials)
 

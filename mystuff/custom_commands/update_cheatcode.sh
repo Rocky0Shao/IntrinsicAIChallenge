@@ -1,0 +1,1 @@
+pixi reinstall ros-kilted-lerobot-robot-aic

@@ -10543,7 +10543,7 @@ packages:
   - numpy >=1.23,<3
 - conda: aic_utils/lerobot_robot_aic
   name: ros-kilted-lerobot-robot-aic
-  version: 0.1.9
+  version: 0.2.0
   build: h60d57d3_0
   subdir: osx-arm64
   variants:
@@ -10563,7 +10563,7 @@ packages:
   license: LicenseRef-Apache-2.0
 - conda: aic_utils/lerobot_robot_aic
   name: ros-kilted-lerobot-robot-aic
-  version: 0.1.9
+  version: 0.2.0
   build: hb0f4dca_0
   subdir: linux-64
   variants:

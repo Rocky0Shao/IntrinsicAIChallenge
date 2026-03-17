@@ -360,34 +360,44 @@ from transforms3d._gohlketransforms import quaternion_multiply
 @dataclass(kw_only=True)
 class AICCheatCodeTeleopConfig(TeleoperatorConfig):
     # Proportional-Integral gains for the velocity controller
-    kp_linear: float = 1.2
+    kp_linear: float = 1.0
     ki_linear: float = 0.2
     max_integrator_windup: float = 0.05
     kp_angular: float = 2.0
 
     # Max velocity clamping
-    max_linear_vel: float = 0.08
+    max_linear_vel: float = 0.06
     max_angular_vel: float = 0.5
 
     # Force-aware insertion parameters
-    force_rampdown_start: float = 5.0    # Start slowing at this force (N)
-    force_rampdown_full: float = 15.0    # Full stop at this force (N)
-    force_retreat_threshold: float = 10.0 # Retreat if above this for too long (N)
-    force_retreat_duration: float = 0.5   # Seconds above retreat threshold before retreating
+    force_rampdown_start: float = 12.0    # Start slowing at this force (N)
+    force_rampdown_full: float = 18.0     # Full stop at this force (N)
+    force_retreat_threshold: float = 19.0 # Retreat if above this for too long (N)
+    force_retreat_duration: float = 0.8   # Seconds above retreat threshold before retreating
 
     # Insertion parameters
-    hover_height: float = 0.05           # Hover height above port for alignment (m)
-    approach_height: float = 0.20        # Initial approach height (m)
-    insertion_base_speed: float = 0.02   # Base descent rate during insertion (m/s per tick)
-    insertion_depth: float = -0.015      # Target z_offset for full insertion (m)
-    retreat_height: float = 0.05         # Height to retreat to on force overload (m)
+    hover_height: float = 0.03            # Hover height above port for alignment (m)
+    approach_height: float = 0.20         # Initial approach height (m)
+    insertion_base_speed: float = 0.01    # Base descent rate during insertion (m/s)
+    insertion_depth: float = -0.015       # Target z_offset for full insertion (m)
+    insertion_dwell: float = 2.0          # Seconds to hold at insertion depth before declaring DONE (s)
+    retreat_height: float = 0.03          # Height to retreat to on force overload (m)
     max_retries: int = 10                 # Max recovery attempts before giving up #TODO: Fix termial logging
 
+    # Search/wiggle parameters (replaces aggressive recovery)
+    search_force_threshold: float = 8.0   # Minimum force to consider stall detection active (N)
+    search_stall_duration: float = 1.5    # Seconds of no downward progress before entering SEARCH
+    search_stall_min_progress: float = 0.001  # Minimum Z progress (m) expected in stall_duration (1mm)
+    search_radius: float = 0.005          # Radius of circular search pattern (m) - 5mm
+    search_speed: float = 2.0             # Angular speed of search circle (rad/s)
+    search_max_cycles: int = 3            # Max full circles before giving up and doing mini-lift
+    search_downward_force: float = 0.002  # Gentle downward z creep during search (m/s)
+
     # Alignment convergence criteria
-    align_xy_tolerance: float = 0.003    # XY error tolerance for alignment (m)
+    align_xy_tolerance: float = 0.003     # XY error tolerance for alignment (m)
     align_angular_tolerance: float = 0.05 # Angular error tolerance (rad)
-    align_timeout: float = 5.0           # Max time in ALIGN phase (s)
-    align_min_dwell: float = 1.0         # Minimum dwell time in ALIGN (s)
+    align_timeout: float = 5.0            # Max time in ALIGN phase (s)
+    align_min_dwell: float = 1.0          # Minimum dwell time in ALIGN (s)
 
     # --- Task Variables (Override via command line) ---
     task_cable_name: str = "cable_0"
@@ -403,9 +413,15 @@ class AICCheatCodeTeleop(Teleoperator):
         self._is_connected = False
 
         # State machine variables
-        self.phase = "INIT"  # INIT -> APPROACH -> ALIGN -> INSERT -> DONE
+        self.phase = "INIT"  # INIT -> APPROACH -> ALIGN -> INSERT -> DONE (SEARCH on moderate force, RECOVERY as last resort)
         self.z_offset = config.approach_height
         self.start_time = 0.0
+        self._last_action_time = None
+        self._insertion_depth_reached_time = None
+        self._search_start_time = None
+        self._search_force_start_time = None
+        self._stall_check_time = None
+        self._stall_check_z = None
         self._retry_count = 0
 
         # Integrator for the PI controller
@@ -447,6 +463,12 @@ class AICCheatCodeTeleop(Teleoperator):
         # Force feedback state
         self._latest_force_mag = 0.0
         self._force_exceed_start_time = None
+        self._last_action_time = None
+        self._insertion_depth_reached_time = None
+        self._search_start_time = None
+        self._search_force_start_time = None
+        self._stall_check_time = None
+        self._stall_check_z = None
         self._has_tare = False
         self._tare_offset = np.zeros(3)
 
@@ -479,7 +501,6 @@ class AICCheatCodeTeleop(Teleoperator):
         tare = msg.controller_state.fts_tare_offset.wrench.force
         self._tare_offset = np.array([tare.x, tare.y, tare.z])
         self._has_tare = True
-
         # 2. Get raw wrist wrench
         raw_force = msg.wrist_wrench.wrench.force
         raw_force_vec = np.array([raw_force.x, raw_force.y, raw_force.z])
@@ -495,8 +516,12 @@ class AICCheatCodeTeleop(Teleoperator):
         #     self._force_print_counter = 0
         # self._force_print_counter += 1
         # if self._force_print_counter % 10 == 0:
-        print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f}")
-
+        search_info = ""
+        if self.phase == "SEARCH" and self._search_start_time is not None:
+            s_elapsed = self._node.get_clock().now().nanoseconds / 1e9 - self._search_start_time
+            cycles = s_elapsed * self.config.search_speed / (2 * np.pi)
+            search_info = f" | search_cycle: {cycles:.1f}/{self.config.search_max_cycles}"
+        print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f} | plug_z_actual: {getattr(self, '_actual_plug_port_z', 'N/A')}{search_info}")
     @property
     def is_calibrated(self) -> bool:
         return True
@@ -619,8 +644,39 @@ class AICCheatCodeTeleop(Teleoperator):
         # 6. State Machine Logic
         # ========================
 
-        # --- Force safety check (applies during INSERT and ALIGN) ---
-        if self.phase in ("INSERT", "ALIGN"):
+        # --- Force safety check ---
+        if self.phase == "INSERT":
+            # Check for SEARCH trigger: stall detection (force + no downward progress)
+            if self._latest_force_mag > cfg.search_force_threshold:
+                actual_plug_z = plug_pos[2] - port_pos[2]
+                if self._stall_check_time is None:
+                    # Start tracking stall
+                    self._stall_check_time = current_time
+                    self._stall_check_z = actual_plug_z
+                else:
+                    stall_elapsed = current_time - self._stall_check_time
+                    z_progress = self._stall_check_z - actual_plug_z  # positive = moving down (good)
+                    if stall_elapsed >= cfg.search_stall_duration:
+                        if z_progress < cfg.search_stall_min_progress:
+                            # Stalled! No meaningful downward progress despite sustained force
+                            print(f"\nStall detected! Force={self._latest_force_mag:.1f}N, no progress for {stall_elapsed:.1f}s (moved {z_progress*1000:.2f}mm). Entering SEARCH...")
+                            self.phase = "SEARCH"
+                            self._search_start_time = current_time
+                            self._search_force_start_time = None
+                            self._force_exceed_start_time = None
+                            self._stall_check_time = None
+                            self._stall_check_z = None
+                        else:
+                            # Making progress, reset stall tracker
+                            self._stall_check_time = current_time
+                            self._stall_check_z = actual_plug_z
+            else:
+                # Force below threshold - reset stall tracking
+                self._search_force_start_time = None
+                self._stall_check_time = None
+                self._stall_check_z = None
+
+            # Also check for hard RECOVERY trigger (very high force)
             if self._latest_force_mag > cfg.force_retreat_threshold:
                 if self._force_exceed_start_time is None:
                     self._force_exceed_start_time = current_time
@@ -630,16 +686,60 @@ class AICCheatCodeTeleop(Teleoperator):
                         print(f"\nMax retries ({cfg.max_retries}) exceeded. Stopping.")
                         self.phase = "DONE"
                     else:
-                        print(f"\nForce retreat triggered ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
+                        print(f"\nHard force retreat ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
                         self.phase = "RECOVERY"
                         self._force_exceed_start_time = None
-                        self.z_offset = cfg.retreat_height  # Only retreat to 5cm, not 20cm!
+                        self._search_force_start_time = None
+                        self._stall_check_time = None
+                        self._stall_check_z = None
+                        self.z_offset = cfg.retreat_height
                         self._lin_err_integrator = np.zeros(3)
                         self.start_time = current_time
+                        self._insertion_depth_reached_time = None
+                        self._search_start_time = None
             else:
                 self._force_exceed_start_time = None
 
+        elif self.phase in ("SEARCH", "ALIGN"):
+            if self._latest_force_mag > cfg.force_retreat_threshold:
+                if self._force_exceed_start_time is None:
+                    self._force_exceed_start_time = current_time
+                elif (current_time - self._force_exceed_start_time) > cfg.force_retreat_duration:
+                    self._retry_count += 1
+                    if self._retry_count > cfg.max_retries:
+                        print(f"\nMax retries ({cfg.max_retries}) exceeded. Stopping.")
+                        self.phase = "DONE"
+                    else:
+                        print(f"\nForce retreat from {self.phase} ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
+                        self.phase = "RECOVERY"
+                        self._force_exceed_start_time = None
+                        self._search_force_start_time = None
+                        self._stall_check_time = None
+                        self._stall_check_z = None
+                        self.z_offset = cfg.retreat_height
+                        self._lin_err_integrator = np.zeros(3)
+                        self.start_time = current_time
+                        self._insertion_depth_reached_time = None
+                        self._search_start_time = None
+            else:
+                self._force_exceed_start_time = None
+        # --- Universal insertion completion check (works in any phase) ---
+        if self.phase not in ("INIT", "APPROACH", "DONE"):
+            actual_plug_port_z = plug_pos[2] - port_pos[2]
+            self._actual_plug_port_z = actual_plug_port_z
+            if actual_plug_port_z <= cfg.insertion_depth + 0.005:  # within 5mm of target depth (more lenient)
+                if self._insertion_depth_reached_time is None:
+                    self._insertion_depth_reached_time = current_time
+                    print(f"[UNIVERSAL] Plug at insertion depth (actual_z={actual_plug_port_z:.4f}m). Dwelling for {cfg.insertion_dwell}s...")
+                elif (current_time - self._insertion_depth_reached_time) >= cfg.insertion_dwell:
+                    print(f"[UNIVERSAL] Insertion complete after {cfg.insertion_dwell}s dwell (actual_z={actual_plug_port_z:.4f}m). DONE.")
+                    self.phase = "DONE"
+            else:
+                self._insertion_depth_reached_time = None
+
         if self.phase == "APPROACH":
+            # Keep integrator zeroed during approach to prevent XY overshoot
+            self._lin_err_integrator = np.zeros(3)
             # Transition to ALIGN when close to hover position
             if dist_to_target < 0.01 and elapsed > 1.5:
                 print(f"Hover reached (err={dist_to_target:.4f}m). Entering ALIGN phase.")
@@ -664,28 +764,79 @@ class AICCheatCodeTeleop(Teleoperator):
                 self._lin_err_integrator = np.zeros(3)
 
         elif self.phase == "RECOVERY":
-            # Wait until robot lifts back near retreat height
+            # Wait until robot lifts back near retreat height, with timeout
+            recovery_elapsed = current_time - self.start_time
             if dist_to_target < 0.01:
-                print("Recovery complete. Re-entering ALIGN phase.")
-                self.phase = "ALIGN"
+                print(f"Recovery complete (z_off={self.z_offset:.3f}). Resuming INSERT.")
+                self.phase = "INSERT"
                 self.start_time = current_time
                 self._lin_err_integrator = np.zeros(3)
+            elif recovery_elapsed > 5.0:
+                print(f"Recovery timeout ({recovery_elapsed:.1f}s). Forcing transition to INSERT.")
+                self.phase = "INSERT"
+                self.start_time = current_time
+                self._lin_err_integrator = np.zeros(3)
+                self.z_offset = cfg.hover_height  # Reset to hover height
 
+        elif self.phase == "SEARCH":
+            # Horizontal circular wiggle to find port opening
+            search_elapsed = current_time - self._search_start_time
+            search_angle = cfg.search_speed * search_elapsed
+            cycles_completed = search_elapsed * cfg.search_speed / (2 * np.pi)
+
+            if cycles_completed >= cfg.search_max_cycles:
+                # Search failed - do a mini lift recovery
+                self._retry_count += 1
+                if self._retry_count > cfg.max_retries:
+                    print(f"\nMax retries ({cfg.max_retries}) exceeded after search. Stopping.")
+                    self.phase = "DONE"
+                else:
+                    print(f"\nSearch exhausted ({cfg.search_max_cycles} cycles). Mini-lift retry {self._retry_count}/{cfg.max_retries}")
+                    self.phase = "RECOVERY"
+                    self.z_offset = cfg.retreat_height
+                    self._lin_err_integrator = np.zeros(3)
+                    self.start_time = current_time
+                    self._insertion_depth_reached_time = None
+                    self._search_start_time = None
+                    self._stall_check_time = None
+                    self._stall_check_z = None
+            else:
+                # Apply circular offset to target position
+                search_offset_x = cfg.search_radius * np.cos(search_angle)
+                search_offset_y = cfg.search_radius * np.sin(search_angle)
+                target_pos[0] += search_offset_x
+                target_pos[1] += search_offset_y
+
+                # Gentle downward creep during search
+                if self._last_action_time is not None:
+                    dt = min(current_time - self._last_action_time, 0.1)
+                    self.z_offset = max(cfg.insertion_depth, self.z_offset - cfg.search_downward_force * dt)
+                    target_pos[2] = port_pos[2] + plug_offset[2] + self.z_offset
+
+                # Check if force suddenly drops (found the hole!)
+                if self._latest_force_mag < cfg.search_force_threshold * 0.6:
+                    print(f"\nForce dropped to {self._latest_force_mag:.1f}N during search - port found! Resuming INSERT.")
+                    self.phase = "INSERT"
+                    self.start_time = current_time
+                    self._search_start_time = None
+                    self._search_force_start_time = None
+                    self._stall_check_time = None
+                    self._stall_check_z = None
+                    self._lin_err_integrator = np.zeros(3)
         elif self.phase == "INSERT":
-            # Force-proportional descent
+            # Force-proportional descent with proper time-based speed
             speed_mult = self._compute_force_speed_multiplier()
-            descent = cfg.insertion_base_speed * speed_mult
+            # Calculate dt for frame-rate independent descent
+            if self._last_action_time is None:
+                dt = 0.033  # assume ~30Hz for first frame
+            else:
+                dt = min(current_time - self._last_action_time, 0.1)  # cap dt at 100ms
+
+            descent = cfg.insertion_base_speed * speed_mult * dt
             self.z_offset = max(cfg.insertion_depth, self.z_offset - descent)
 
             # Recompute target with possibly updated z_offset
             target_pos[2] = port_pos[2] + plug_offset[2] + self.z_offset
-
-            # Check completion
-            z_error = abs(target_pos[2] - gripper_pos[2])
-            if self.z_offset <= cfg.insertion_depth and z_error < 0.005:
-                print("Insertion complete! DONE.")
-                self.phase = "DONE"
-
         elif self.phase == "DONE":
             for key in self._current_actions:
                 self._current_actions[key] = 0.0
@@ -703,12 +854,11 @@ class AICCheatCodeTeleop(Teleoperator):
 
         v_linear_world = (cfg.kp_linear * lin_err) + (cfg.ki_linear * self._lin_err_integrator)
 
-        # During INSERT, limit max velocity more aggressively for smoothness
-        if self.phase == "INSERT":
-            max_lin = cfg.max_linear_vel * 0.6  # Slower during insertion
+        # During INSERT and SEARCH, limit max velocity more aggressively for smoothness
+        if self.phase in ("INSERT", "SEARCH"):
+            max_lin = cfg.max_linear_vel * 0.6  # Slower during insertion/search
         else:
             max_lin = cfg.max_linear_vel
-
         v_linear_world = np.clip(v_linear_world, -max_lin, max_lin)
 
         # Angular velocity
@@ -728,6 +878,7 @@ class AICCheatCodeTeleop(Teleoperator):
             "angular.z": float(v_angular_tcp[2]),
         }
 
+        self._last_action_time = current_time
         return cast(dict, self._current_actions)
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:
