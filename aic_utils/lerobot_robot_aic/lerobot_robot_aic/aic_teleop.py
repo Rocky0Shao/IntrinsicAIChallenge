@@ -342,15 +342,10 @@ class AICSpaceMouseTeleop(Teleoperator):
         self._is_connected = False
         pass
 # ==============================================================================
-# START OF NEW ADDITION: AICCheatCodeTeleop (Improved v2)
+# START OF NEW ADDITION: AICCheatCodeTeleop (Simplified)
 # ==============================================================================
 import numpy as np
-from dataclasses import dataclass
-from typing import Any, cast
-from threading import Thread
-
-import rclpy
-from rclpy.executors import SingleThreadedExecutor
+from aic_model_interfaces.msg import Observation
 from scipy.spatial.transform import Rotation as R
 from tf2_ros import Buffer, TransformListener
 from transforms3d._gohlketransforms import quaternion_multiply
@@ -359,45 +354,32 @@ from transforms3d._gohlketransforms import quaternion_multiply
 @TeleoperatorConfig.register_subclass("aic_cheatcode")
 @dataclass(kw_only=True)
 class AICCheatCodeTeleopConfig(TeleoperatorConfig):
-    # Proportional-Integral gains for the velocity controller
+    # PI gains for world-frame linear velocity control
     kp_linear: float = 1.0
     ki_linear: float = 0.2
     max_integrator_windup: float = 0.05
     kp_angular: float = 2.0
 
-    # Max velocity clamping
-    max_linear_vel: float = 0.06
+    # Velocity limits
+    max_linear_vel: float = 0.04
     max_angular_vel: float = 0.5
 
-    # Force-aware insertion parameters
-    force_rampdown_start: float = 12.0    # Start slowing at this force (N)
-    force_rampdown_full: float = 18.0     # Full stop at this force (N)
-    force_retreat_threshold: float = 19.0 # Retreat if above this for too long (N)
-    force_retreat_duration: float = 0.8   # Seconds above retreat threshold before retreating
+    # Force-aware insertion slowdown (no retreat/recovery)
+    force_rampdown_start: float = 15.0
+    force_rampdown_full: float = 19.0
 
-    # Insertion parameters
-    hover_height: float = 0.03            # Hover height above port for alignment (m)
-    approach_height: float = 0.20         # Initial approach height (m)
-    insertion_base_speed: float = 0.01    # Base descent rate during insertion (m/s)
-    insertion_depth: float = -0.015       # Target z_offset for full insertion (m)
-    insertion_dwell: float = 2.0          # Seconds to hold at insertion depth before declaring DONE (s)
-    retreat_height: float = 0.03          # Height to retreat to on force overload (m)
-    max_retries: int = 10                 # Max recovery attempts before giving up #TODO: Fix termial logging
-
-    # Search/wiggle parameters (replaces aggressive recovery)
-    search_force_threshold: float = 8.0   # Minimum force to consider stall detection active (N)
-    search_stall_duration: float = 1.5    # Seconds of no downward progress before entering SEARCH
-    search_stall_min_progress: float = 0.001  # Minimum Z progress (m) expected in stall_duration (1mm)
-    search_radius: float = 0.005          # Radius of circular search pattern (m) - 5mm
-    search_speed: float = 2.0             # Angular speed of search circle (rad/s)
-    search_max_cycles: int = 3            # Max full circles before giving up and doing mini-lift
-    search_downward_force: float = 0.002  # Gentle downward z creep during search (m/s)
+    # Insertion geometry/timing
+    hover_height: float = 0.03  # Reduced from 0.10 - less drift time
+    approach_height: float = 0.20
+    insertion_base_speed: float = 0.012  # Increased from 0.008 - faster descent
+    insertion_depth: float = -0.015
+    insertion_dwell: float = 2.0
 
     # Alignment convergence criteria
-    align_xy_tolerance: float = 0.003     # XY error tolerance for alignment (m)
-    align_angular_tolerance: float = 0.05 # Angular error tolerance (rad)
-    align_timeout: float = 5.0            # Max time in ALIGN phase (s)
-    align_min_dwell: float = 1.0          # Minimum dwell time in ALIGN (s)
+    align_xy_tolerance: float = 0.0005
+    align_angular_tolerance: float = 0.03
+    align_timeout: float = 8.0
+    align_min_dwell: float = 2.0
 
     # --- Task Variables (Override via command line) ---
     task_cable_name: str = "cable_0"
@@ -412,24 +394,32 @@ class AICCheatCodeTeleop(Teleoperator):
         self.config = config
         self._is_connected = False
 
-        # State machine variables
-        self.phase = "INIT"  # INIT -> APPROACH -> ALIGN -> INSERT -> DONE (SEARCH on moderate force, RECOVERY as last resort)
+        # State machine: INIT -> APPROACH -> ALIGN -> INSERT -> DONE
+        self.phase = "INIT"
         self.z_offset = config.approach_height
         self.start_time = 0.0
+
+        # Timing/state bookkeeping
         self._last_action_time = None
         self._insertion_depth_reached_time = None
-        self._search_start_time = None
-        self._search_force_start_time = None
-        self._stall_check_time = None
-        self._stall_check_z = None
-        self._retry_count = 0
+        self._force_exceed_start_time = None
+        self._actual_plug_port_z = float("nan")
 
-        # Integrator for the PI controller
+        # Integrator for linear PI controller
         self._lin_err_integrator = np.zeros(3)
 
+        # Force/tare state
+        self._latest_force_mag = 0.0
+        self._has_tare = False
+        self._tare_offset = np.zeros(3)
+
         self._current_actions: MotionUpdateActionDict = {
-            "linear.x": 0.0, "linear.y": 0.0, "linear.z": 0.0,
-            "angular.x": 0.0, "angular.y": 0.0, "angular.z": 0.0,
+            "linear.x": 0.0,
+            "linear.y": 0.0,
+            "linear.z": 0.0,
+            "angular.x": 0.0,
+            "angular.y": 0.0,
+            "angular.z": 0.0,
         }
 
     @property
@@ -455,37 +445,23 @@ class AICCheatCodeTeleop(Teleoperator):
         if not rclpy.ok():
             rclpy.init()
 
-        # Spin up a background ROS 2 node to listen to TF ground truth
         self._node = rclpy.create_node("cheatcode_teleop")
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self._node)
 
-        # Force feedback state
         self._latest_force_mag = 0.0
         self._force_exceed_start_time = None
         self._last_action_time = None
         self._insertion_depth_reached_time = None
-        self._search_start_time = None
-        self._search_force_start_time = None
-        self._stall_check_time = None
-        self._stall_check_z = None
         self._has_tare = False
         self._tare_offset = np.zeros(3)
 
-        # Import Observation message here to avoid circular dependencies
-        from aic_model_interfaces.msg import Observation
-
-        # Subscribe to observations to get wrist wrench and tare offset
         self._obs_sub = self._node.create_subscription(
             Observation,
             "/observations",
             self._obs_callback,
-            qos_profile_sensor_data
+            qos_profile_sensor_data,
         )
-        if self._obs_sub is not None:
-            print("Observation subscriber created successfully.")
-        else:
-            print("Failed to create observation subscriber.")
 
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
@@ -493,35 +469,31 @@ class AICCheatCodeTeleop(Teleoperator):
         self._executor_thread.start()
 
         self._is_connected = True
-        print(f"\n\nCheatCode Teleop v2 connected. Target: {self.config.task_port_name} on {self.config.task_module_name}")
+        print(
+            f"\n\nCheatCode Teleop connected. "
+            f"Target: {self.config.task_port_name} on {self.config.task_module_name}"
+        )
 
-    def _obs_callback(self, msg):
-        """Processes the observation message to calculate insertion force magnitude."""
-        # 1. Capture tare offset from controller state
+    def _obs_callback(self, msg: Observation) -> None:
+        # Capture tare offset from controller state
         tare = msg.controller_state.fts_tare_offset.wrench.force
         self._tare_offset = np.array([tare.x, tare.y, tare.z])
         self._has_tare = True
-        # 2. Get raw wrist wrench
+
+        # Get raw wrist wrench and apply tare
         raw_force = msg.wrist_wrench.wrench.force
         raw_force_vec = np.array([raw_force.x, raw_force.y, raw_force.z])
-
-        # 3. Apply tare
         tared_force = raw_force_vec - self._tare_offset
 
-        # 4. Calculate Euclidean force magnitude (rotation-invariant)
+        # Rotation-invariant force magnitude
         self._latest_force_mag = float(np.linalg.norm(tared_force))
 
-        # # Throttled print
-        # if not hasattr(self, '_force_print_counter'):
-        #     self._force_print_counter = 0
-        # self._force_print_counter += 1
-        # if self._force_print_counter % 10 == 0:
-        search_info = ""
-        if self.phase == "SEARCH" and self._search_start_time is not None:
-            s_elapsed = self._node.get_clock().now().nanoseconds / 1e9 - self._search_start_time
-            cycles = s_elapsed * self.config.search_speed / (2 * np.pi)
-            search_info = f" | search_cycle: {cycles:.1f}/{self.config.search_max_cycles}"
-        print(f"[CheatCode] Force: {self._latest_force_mag:.1f}N | Phase: {self.phase} | z_off: {self.z_offset:.4f} | plug_z_actual: {getattr(self, '_actual_plug_port_z', 'N/A')}{search_info}")
+        print(
+            f"[CheatCode] Force: {self._latest_force_mag:.1f}N | "
+            f"Phase: {self.phase} | z_off: {self.z_offset:.4f} | "
+            f"plug_z_actual: {self._actual_plug_port_z}"
+        )
+
     @property
     def is_calibrated(self) -> bool:
         return True
@@ -533,220 +505,168 @@ class AICCheatCodeTeleop(Teleoperator):
         pass
 
     def _get_transform(self, target_frame: str, source_frame: str):
-        """Helper to get transforms without throwing exceptions in the main loop."""
         try:
             return self._tf_buffer.lookup_transform(target_frame, source_frame, Time())
         except Exception:
             return None
 
     def _compute_force_speed_multiplier(self) -> float:
-        """Returns a speed multiplier [0.0, 1.0] based on sensed force.
-        Linearly ramps from 1.0 at force_rampdown_start to 0.0 at force_rampdown_full."""
+        """Linearly ramp insertion speed from 1.0 -> 0.0 based on force."""
         f = self._latest_force_mag
         if f <= self.config.force_rampdown_start:
             return 1.0
-        elif f >= self.config.force_rampdown_full:
+        if f >= self.config.force_rampdown_full:
             return 0.0
-        else:
-            return 1.0 - (f - self.config.force_rampdown_start) / (self.config.force_rampdown_full - self.config.force_rampdown_start)
+        return 1.0 - (
+            (f - self.config.force_rampdown_start)
+            / (self.config.force_rampdown_full - self.config.force_rampdown_start)
+        )
+
+    def _set_zero_action(self) -> dict[str, Any]:
+        for key in self._current_actions:
+            self._current_actions[key] = 0.0
+        return cast(dict, self._current_actions)
 
     def get_action(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError()
 
         cfg = self.config
+        current_time = self._node.get_clock().now().nanoseconds / 1e9
 
-        # 1. Define required TF frames from config
+        # Required TF frames from config
         port_frame = f"task_board/{cfg.task_module_name}/{cfg.task_port_name}_link"
         cable_tip_frame = f"{cfg.task_cable_name}/{cfg.task_plug_name}_link"
 
-        # 2. Look up current transforms
+        # Current transforms
         port_tf = self._get_transform("base_link", port_frame)
         plug_tf = self._get_transform("base_link", cable_tip_frame)
         gripper_tf = self._get_transform("base_link", "gripper/tcp")
 
-        # If we are missing TFs, output 0 velocity
+        # If TFs are missing, hold still
         if not port_tf or not plug_tf or not gripper_tf:
             if self.phase == "INIT":
                 print("Waiting for ground truth TFs...", end="\r")
-            else:
-                for key in self._current_actions:
-                    self._current_actions[key] = 0.0
-            return cast(dict, self._current_actions)
+            return self._set_zero_action()
 
-        # Transition out of INIT once TFs are found
+        # Transition out of INIT
         if self.phase == "INIT":
             print("\nTFs found! Starting APPROACH phase.")
             self.phase = "APPROACH"
             self.z_offset = cfg.approach_height
-            self.start_time = self._node.get_clock().now().nanoseconds / 1e9
+            self.start_time = current_time
             self._lin_err_integrator = np.zeros(3)
 
-        current_time = self._node.get_clock().now().nanoseconds / 1e9
         elapsed = current_time - self.start_time
 
-        # 3. Extract positions and orientations
-        gripper_pos = np.array([
-            gripper_tf.transform.translation.x,
-            gripper_tf.transform.translation.y,
-            gripper_tf.transform.translation.z
-        ])
-        plug_pos = np.array([
-            plug_tf.transform.translation.x,
-            plug_tf.transform.translation.y,
-            plug_tf.transform.translation.z
-        ])
-        port_pos = np.array([
-            port_tf.transform.translation.x,
-            port_tf.transform.translation.y,
-            port_tf.transform.translation.z
-        ])
+        # Extract positions
+        gripper_pos = np.array(
+            [
+                gripper_tf.transform.translation.x,
+                gripper_tf.transform.translation.y,
+                gripper_tf.transform.translation.z,
+            ]
+        )
+        plug_pos = np.array(
+            [
+                plug_tf.transform.translation.x,
+                plug_tf.transform.translation.y,
+                plug_tf.transform.translation.z,
+            ]
+        )
+        port_pos = np.array(
+            [
+                port_tf.transform.translation.x,
+                port_tf.transform.translation.y,
+                port_tf.transform.translation.z,
+            ]
+        )
 
         # Quaternions (w, x, y, z)
         q_port = (
-            port_tf.transform.rotation.w, port_tf.transform.rotation.x,
-            port_tf.transform.rotation.y, port_tf.transform.rotation.z
+            port_tf.transform.rotation.w,
+            port_tf.transform.rotation.x,
+            port_tf.transform.rotation.y,
+            port_tf.transform.rotation.z,
         )
         q_plug = (
-            plug_tf.transform.rotation.w, plug_tf.transform.rotation.x,
-            plug_tf.transform.rotation.y, plug_tf.transform.rotation.z
+            plug_tf.transform.rotation.w,
+            plug_tf.transform.rotation.x,
+            plug_tf.transform.rotation.y,
+            plug_tf.transform.rotation.z,
         )
         q_gripper = (
-            gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
-            gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z
+            gripper_tf.transform.rotation.w,
+            gripper_tf.transform.rotation.x,
+            gripper_tf.transform.rotation.y,
+            gripper_tf.transform.rotation.z,
         )
 
-        # 4. Calculate target orientation (align plug to port)
+        # Target orientation (align plug to port)
         q_plug_inv = (-q_plug[0], q_plug[1], q_plug[2], q_plug[3])
         q_diff = quaternion_multiply(q_port, q_plug_inv)
         q_gripper_target = quaternion_multiply(q_diff, q_gripper)
 
-        # 5. Calculate target position
-        plug_offset = gripper_pos - plug_pos  # how gripper holds the plug
+        # Target position
+        plug_offset = gripper_pos - plug_pos
+        target_pos = np.array(
+            [
+                port_pos[0] + plug_offset[0],
+                port_pos[1] + plug_offset[1],
+                port_pos[2] + plug_offset[2] + self.z_offset,
+            ]
+        )
 
-        target_pos = np.array([
-            port_pos[0] + plug_offset[0],
-            port_pos[1] + plug_offset[1],
-            port_pos[2] + plug_offset[2] + self.z_offset
-        ])
-
-        # Compute alignment errors
+        # Alignment errors
         xy_error = np.linalg.norm(target_pos[:2] - gripper_pos[:2])
         dist_to_target = np.linalg.norm(target_pos - gripper_pos)
 
-        # Compute angular error
+        # Angular error
         r_current = R.from_quat([q_gripper[1], q_gripper[2], q_gripper[3], q_gripper[0]])
-        r_target = R.from_quat([q_gripper_target[1], q_gripper_target[2], q_gripper_target[3], q_gripper_target[0]])
+        r_target = R.from_quat(
+            [
+                q_gripper_target[1],
+                q_gripper_target[2],
+                q_gripper_target[3],
+                q_gripper_target[0],
+            ]
+        )
         r_error = r_target * r_current.inv()
         angular_error = float(np.linalg.norm(r_error.as_rotvec()))
 
-        # ========================
-        # 6. State Machine Logic
-        # ========================
-
-        # --- Force safety check ---
-        if self.phase == "INSERT":
-            # Check for SEARCH trigger: stall detection (force + no downward progress)
-            if self._latest_force_mag > cfg.search_force_threshold:
-                actual_plug_z = plug_pos[2] - port_pos[2]
-                if self._stall_check_time is None:
-                    # Start tracking stall
-                    self._stall_check_time = current_time
-                    self._stall_check_z = actual_plug_z
-                else:
-                    stall_elapsed = current_time - self._stall_check_time
-                    z_progress = self._stall_check_z - actual_plug_z  # positive = moving down (good)
-                    if stall_elapsed >= cfg.search_stall_duration:
-                        if z_progress < cfg.search_stall_min_progress:
-                            # Stalled! No meaningful downward progress despite sustained force
-                            print(f"\nStall detected! Force={self._latest_force_mag:.1f}N, no progress for {stall_elapsed:.1f}s (moved {z_progress*1000:.2f}mm). Entering SEARCH...")
-                            self.phase = "SEARCH"
-                            self._search_start_time = current_time
-                            self._search_force_start_time = None
-                            self._force_exceed_start_time = None
-                            self._stall_check_time = None
-                            self._stall_check_z = None
-                        else:
-                            # Making progress, reset stall tracker
-                            self._stall_check_time = current_time
-                            self._stall_check_z = actual_plug_z
-            else:
-                # Force below threshold - reset stall tracking
-                self._search_force_start_time = None
-                self._stall_check_time = None
-                self._stall_check_z = None
-
-            # Also check for hard RECOVERY trigger (very high force)
-            if self._latest_force_mag > cfg.force_retreat_threshold:
-                if self._force_exceed_start_time is None:
-                    self._force_exceed_start_time = current_time
-                elif (current_time - self._force_exceed_start_time) > cfg.force_retreat_duration:
-                    self._retry_count += 1
-                    if self._retry_count > cfg.max_retries:
-                        print(f"\nMax retries ({cfg.max_retries}) exceeded. Stopping.")
-                        self.phase = "DONE"
-                    else:
-                        print(f"\nHard force retreat ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
-                        self.phase = "RECOVERY"
-                        self._force_exceed_start_time = None
-                        self._search_force_start_time = None
-                        self._stall_check_time = None
-                        self._stall_check_z = None
-                        self.z_offset = cfg.retreat_height
-                        self._lin_err_integrator = np.zeros(3)
-                        self.start_time = current_time
-                        self._insertion_depth_reached_time = None
-                        self._search_start_time = None
-            else:
-                self._force_exceed_start_time = None
-
-        elif self.phase in ("SEARCH", "ALIGN"):
-            if self._latest_force_mag > cfg.force_retreat_threshold:
-                if self._force_exceed_start_time is None:
-                    self._force_exceed_start_time = current_time
-                elif (current_time - self._force_exceed_start_time) > cfg.force_retreat_duration:
-                    self._retry_count += 1
-                    if self._retry_count > cfg.max_retries:
-                        print(f"\nMax retries ({cfg.max_retries}) exceeded. Stopping.")
-                        self.phase = "DONE"
-                    else:
-                        print(f"\nForce retreat from {self.phase} ({self._latest_force_mag:.1f}N). Retry {self._retry_count}/{cfg.max_retries}")
-                        self.phase = "RECOVERY"
-                        self._force_exceed_start_time = None
-                        self._search_force_start_time = None
-                        self._stall_check_time = None
-                        self._stall_check_z = None
-                        self.z_offset = cfg.retreat_height
-                        self._lin_err_integrator = np.zeros(3)
-                        self.start_time = current_time
-                        self._insertion_depth_reached_time = None
-                        self._search_start_time = None
-            else:
-                self._force_exceed_start_time = None
-        # --- Universal insertion completion check (works in any phase) ---
+        # Universal insertion completion check
         if self.phase not in ("INIT", "APPROACH", "DONE"):
             actual_plug_port_z = plug_pos[2] - port_pos[2]
             self._actual_plug_port_z = actual_plug_port_z
-            if actual_plug_port_z <= cfg.insertion_depth + 0.005:  # within 5mm of target depth (more lenient)
+            if actual_plug_port_z <= cfg.insertion_depth + 0.005:
                 if self._insertion_depth_reached_time is None:
                     self._insertion_depth_reached_time = current_time
-                    print(f"[UNIVERSAL] Plug at insertion depth (actual_z={actual_plug_port_z:.4f}m). Dwelling for {cfg.insertion_dwell}s...")
-                elif (current_time - self._insertion_depth_reached_time) >= cfg.insertion_dwell:
-                    print(f"[UNIVERSAL] Insertion complete after {cfg.insertion_dwell}s dwell (actual_z={actual_plug_port_z:.4f}m). DONE.")
+                    print(
+                        "[UNIVERSAL] Plug at insertion depth "
+                        f"(actual_z={actual_plug_port_z:.4f}m). "
+                        f"Dwelling for {cfg.insertion_dwell}s..."
+                    )
+                elif (
+                    current_time - self._insertion_depth_reached_time
+                ) >= cfg.insertion_dwell:
+                    print(
+                        "[UNIVERSAL] Insertion complete after "
+                        f"{cfg.insertion_dwell}s dwell "
+                        f"(actual_z={actual_plug_port_z:.4f}m). DONE."
+                    )
                     self.phase = "DONE"
             else:
                 self._insertion_depth_reached_time = None
 
+        # State machine transitions
         if self.phase == "APPROACH":
-            # Keep integrator zeroed during approach to prevent XY overshoot
             self._lin_err_integrator = np.zeros(3)
-            # Transition to ALIGN when close to hover position
             if dist_to_target < 0.01 and elapsed > 1.5:
                 print(f"Hover reached (err={dist_to_target:.4f}m). Entering ALIGN phase.")
                 self.phase = "ALIGN"
-                self.z_offset = cfg.hover_height  # Lower to fine-align height
+                self.z_offset = cfg.hover_height
                 self.start_time = current_time
-                self._lin_err_integrator = np.zeros(3)
+                # Keep integrator — don't reset XY correction across phases
 
         elif self.phase == "ALIGN":
             align_elapsed = current_time - self.start_time
@@ -754,121 +674,112 @@ class AICCheatCodeTeleop(Teleoperator):
             ang_ok = angular_error < cfg.align_angular_tolerance
             dwell_ok = align_elapsed > cfg.align_min_dwell
 
+            # Periodic logging during ALIGN
+            plug_port_xy_dist = np.linalg.norm(port_pos[:2] - plug_pos[:2])
+            if int(align_elapsed * 10) % 5 == 0:  # Log every 0.5s
+                print(
+                    f"[ALIGN] t={align_elapsed:.1f}s | gripper_xy_err={xy_error:.4f}m | "
+                    f"plug_xy_err={plug_port_xy_dist:.4f}m | ang_err={angular_error:.3f}rad | "
+                    f"integrator=[{self._lin_err_integrator[0]:.3f}, {self._lin_err_integrator[1]:.3f}]"
+                )
+
             if (xy_ok and ang_ok and dwell_ok) or align_elapsed > cfg.align_timeout:
                 if align_elapsed > cfg.align_timeout:
-                    print(f"ALIGN timeout ({cfg.align_timeout}s). Proceeding (xy={xy_error:.4f}, ang={angular_error:.3f})")
+                    print(
+                        f"ALIGN timeout ({cfg.align_timeout}s). Proceeding "
+                        f"(xy={xy_error:.4f}, ang={angular_error:.3f})"
+                    )
                 else:
-                    print(f"Aligned! (xy={xy_error:.4f}m, ang={angular_error:.3f}rad, dwell={align_elapsed:.1f}s). Starting INSERT.")
+                    print(
+                        "Aligned! "
+                        f"(xy={xy_error:.4f}m, ang={angular_error:.3f}rad, "
+                        f"dwell={align_elapsed:.1f}s). Starting INSERT."
+                    )
                 self.phase = "INSERT"
                 self.start_time = current_time
-                self._lin_err_integrator = np.zeros(3)
+                # Keep integrator — carries XY correction built during ALIGN
 
-        elif self.phase == "RECOVERY":
-            # Wait until robot lifts back near retreat height, with timeout
-            recovery_elapsed = current_time - self.start_time
-            if dist_to_target < 0.01:
-                print(f"Recovery complete (z_off={self.z_offset:.3f}). Resuming INSERT.")
-                self.phase = "INSERT"
-                self.start_time = current_time
-                self._lin_err_integrator = np.zeros(3)
-            elif recovery_elapsed > 5.0:
-                print(f"Recovery timeout ({recovery_elapsed:.1f}s). Forcing transition to INSERT.")
-                self.phase = "INSERT"
-                self.start_time = current_time
-                self._lin_err_integrator = np.zeros(3)
-                self.z_offset = cfg.hover_height  # Reset to hover height
-
-        elif self.phase == "SEARCH":
-            # Horizontal circular wiggle to find port opening
-            search_elapsed = current_time - self._search_start_time
-            search_angle = cfg.search_speed * search_elapsed
-            cycles_completed = search_elapsed * cfg.search_speed / (2 * np.pi)
-
-            if cycles_completed >= cfg.search_max_cycles:
-                # Search failed - do a mini lift recovery
-                self._retry_count += 1
-                if self._retry_count > cfg.max_retries:
-                    print(f"\nMax retries ({cfg.max_retries}) exceeded after search. Stopping.")
-                    self.phase = "DONE"
-                else:
-                    print(f"\nSearch exhausted ({cfg.search_max_cycles} cycles). Mini-lift retry {self._retry_count}/{cfg.max_retries}")
-                    self.phase = "RECOVERY"
-                    self.z_offset = cfg.retreat_height
-                    self._lin_err_integrator = np.zeros(3)
-                    self.start_time = current_time
-                    self._insertion_depth_reached_time = None
-                    self._search_start_time = None
-                    self._stall_check_time = None
-                    self._stall_check_z = None
-            else:
-                # Apply circular offset to target position
-                search_offset_x = cfg.search_radius * np.cos(search_angle)
-                search_offset_y = cfg.search_radius * np.sin(search_angle)
-                target_pos[0] += search_offset_x
-                target_pos[1] += search_offset_y
-
-                # Gentle downward creep during search
-                if self._last_action_time is not None:
-                    dt = min(current_time - self._last_action_time, 0.1)
-                    self.z_offset = max(cfg.insertion_depth, self.z_offset - cfg.search_downward_force * dt)
-                    target_pos[2] = port_pos[2] + plug_offset[2] + self.z_offset
-
-                # Check if force suddenly drops (found the hole!)
-                if self._latest_force_mag < cfg.search_force_threshold * 0.6:
-                    print(f"\nForce dropped to {self._latest_force_mag:.1f}N during search - port found! Resuming INSERT.")
-                    self.phase = "INSERT"
-                    self.start_time = current_time
-                    self._search_start_time = None
-                    self._search_force_start_time = None
-                    self._stall_check_time = None
-                    self._stall_check_z = None
-                    self._lin_err_integrator = np.zeros(3)
         elif self.phase == "INSERT":
-            # Force-proportional descent with proper time-based speed
-            speed_mult = self._compute_force_speed_multiplier()
-            # Calculate dt for frame-rate independent descent
-            if self._last_action_time is None:
-                dt = 0.033  # assume ~30Hz for first frame
+            # Safety hold only - no rampdown (rely on wrench feedback for compliance)
+            force_hold_threshold = 19.5
+            force_hold_duration = 0.8
+            if self._latest_force_mag > force_hold_threshold:
+                if self._force_exceed_start_time is None:
+                    self._force_exceed_start_time = current_time
+                elif (current_time - self._force_exceed_start_time) > force_hold_duration:
+                    print(
+                        f"[INSERT] High force sustained ({self._latest_force_mag:.1f}N) - "
+                        "safety hold until force drops."
+                    )
+                    self._last_action_time = current_time
+                    return self._set_zero_action()
             else:
-                dt = min(current_time - self._last_action_time, 0.1)  # cap dt at 100ms
+                self._force_exceed_start_time = None
 
-            descent = cfg.insertion_base_speed * speed_mult * dt
+            # Constant-speed descent (no force rampdown - matches original CheatCode)
+            if self._last_action_time is None:
+                dt = 0.033
+            else:
+                dt = min(current_time - self._last_action_time, 0.1)
+
+            descent = cfg.insertion_base_speed * dt
             self.z_offset = max(cfg.insertion_depth, self.z_offset - descent)
-
-            # Recompute target with possibly updated z_offset
             target_pos[2] = port_pos[2] + plug_offset[2] + self.z_offset
+
+            # Debug logging
+            print(
+                f"[INSERT] z_offset={self.z_offset:.4f} | descent_rate={descent/dt:.4f}m/s | "
+                f"force={self._latest_force_mag:.1f}N | dt={dt:.3f}s"
+            )
+
         elif self.phase == "DONE":
-            for key in self._current_actions:
-                self._current_actions[key] = 0.0
-            return cast(dict, self._current_actions)
+            self._last_action_time = current_time
+            return self._set_zero_action()
 
-        # ========================
-        # 7. PI Velocity Controller (World Frame)
-        # ========================
+        # PI velocity controller (world frame)
         lin_err = target_pos - gripper_pos
-        self._lin_err_integrator = np.clip(
-            self._lin_err_integrator + lin_err,
+
+        # XY-only integrator using plug-tip-to-port error (like original CheatCode)
+        # This directly compensates for cable droop and gripper compliance
+        plug_xy_error = port_pos[:2] - plug_pos[:2]
+        self._lin_err_integrator[:2] = np.clip(
+            self._lin_err_integrator[:2] + plug_xy_error,
             -cfg.max_integrator_windup,
-            cfg.max_integrator_windup
+            cfg.max_integrator_windup,
         )
+        # Never integrate Z - it's managed by explicit z_offset descent
+        self._lin_err_integrator[2] = 0.0
 
-        v_linear_world = (cfg.kp_linear * lin_err) + (cfg.ki_linear * self._lin_err_integrator)
+        # Proportional term uses full gripper error, integral uses plug-tip XY error
+        v_linear_world = cfg.kp_linear * lin_err + np.array([
+            cfg.ki_linear * self._lin_err_integrator[0],
+            cfg.ki_linear * self._lin_err_integrator[1],
+            0.0,  # No integral term for Z
+        ])
 
-        # During INSERT and SEARCH, limit max velocity more aggressively for smoothness
-        if self.phase in ("INSERT", "SEARCH"):
-            max_lin = cfg.max_linear_vel * 0.6  # Slower during insertion/search
+        # Slower velocity limit in INSERT for smooth motion
+        if self.phase == "INSERT":
+            max_lin = cfg.max_linear_vel * 0.5
         else:
             max_lin = cfg.max_linear_vel
         v_linear_world = np.clip(v_linear_world, -max_lin, max_lin)
 
-        # Angular velocity
-        v_angular_world = np.clip(cfg.kp_angular * r_error.as_rotvec(), -cfg.max_angular_vel, cfg.max_angular_vel)
+        # Reduce angular gain during INSERT to prevent binding torques
+        if self.phase == "INSERT":
+            kp_angular_effective = cfg.kp_angular * 0.25  # 2.0 → 0.5
+        else:
+            kp_angular_effective = cfg.kp_angular
 
-        # 8. Transform World-Frame velocities into TCP-Frame velocities
+        v_angular_world = np.clip(
+            kp_angular_effective * r_error.as_rotvec(),
+            -cfg.max_angular_vel,
+            cfg.max_angular_vel,
+        )
+
+        # Transform world-frame velocities into TCP-frame velocities
         v_linear_tcp = r_current.inv().apply(v_linear_world)
         v_angular_tcp = r_current.inv().apply(v_angular_world)
 
-        # 9. Map to LeRobot action dict
         self._current_actions = {
             "linear.x": float(v_linear_tcp[0]),
             "linear.y": float(v_linear_tcp[1]),
@@ -886,8 +797,9 @@ class AICCheatCodeTeleop(Teleoperator):
 
     def disconnect(self) -> None:
         self._is_connected = False
-        if hasattr(self, '_node'):
+        if hasattr(self, "_node"):
             self._node.destroy_node()
+
 
 # ==============================================================================
 # END OF NEW ADDITION: AICCheatCodeTeleop

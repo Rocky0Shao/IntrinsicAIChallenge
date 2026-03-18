@@ -18,8 +18,9 @@
 
 ### Current Status
 - **Phase**: Pre-data gathering - improving cheatcode teleop reliability
-- **Main Problem**: Cheatcode teleop doesn't work 100% of the time; frequently triggers force feedback penalty (>20N for >1s = -12 points)
-- **Force feedback avoidance**: Incorporated but needs improvement
+- **Main Problem (previously)**: Force rampdown was too aggressive (older thresholding caused stalling around ~10N during INSERT)
+- **Current Fix**: Raised force rampdown thresholds and simplified insertion behavior to mirror official push-through strategy, while keeping force safety holds
+- **State Machine**: Simplified to INIT → APPROACH → ALIGN → INSERT → DONE (SEARCH/RECOVERY removed)
 - HuggingFace repo: rockyshao22/Intrinsic_AI
 
 ## Repository Structure
@@ -59,7 +60,7 @@
 └── aic_controller/                   # Low-level robot controller (C++)
 ```
 
-## Key File: aic_teleop.py (663 lines)
+## Key File: aic_teleop.py (779 lines)
 
 Located at: `aic_utils/lerobot_robot_aic/lerobot_robot_aic/aic_teleop.py`
 
@@ -74,37 +75,42 @@ Contains 4 teleoperator classes:
 **Config parameters** (AICCheatCodeTeleopConfig):
 - kp_linear=1.0, ki_linear=0.2, max_integrator_windup=0.05
 - kp_angular=2.0
-- max_linear_vel=0.06, max_angular_vel=0.5
+- max_linear_vel=0.04, max_angular_vel=0.5
+- force_rampdown_start=15.0, force_rampdown_full=19.0
+- insertion_base_speed=0.008
+- hover_height=0.03, approach_height=0.20
+- insertion_depth=-0.015, insertion_dwell=2.0
+- align_xy_tolerance=0.0005, align_angular_tolerance=0.03, align_timeout=8.0, align_min_dwell=2.0
 - task_cable_name, task_plug_name, task_module_name, task_port_name (set per trial)
 
-**State Machine**: INIT → APPROACH → ALIGN → INSERT → DONE (with SEARCH on moderate force >17N, RECOVERY as last resort >19N)
+**State Machine**: INIT → APPROACH → ALIGN → INSERT → DONE (force-proportional slowdown in INSERT, hard safety hold at 19.5N)
 
 **How it works**:
 1. Looks up ground-truth TF frames for port and plug positions
 2. Computes target gripper position = port_position + gripper-to-plug offset + z_offset
 3. Computes target orientation using quaternion math
 4. Uses PI velocity controller to drive towards target
-5. Transforms world-frame velocities to TCP-frame velocities
+5. During INSERT, applies simplified force handling: force rampdown linearly from 15N to 19N (speed 1.0 → 0.0), hard safety hold at 19.5N (zero velocity until force drops), and no SEARCH/wiggle or RECOVERY/retreat behavior
+6. Transforms world-frame velocities to TCP-frame velocities
 
 **Key difference from official CheatCode**:
 - Official CheatCode uses POSITION targets (set_pose_target with MotionUpdate MODE_POSITION)
 - Teleop CheatCode uses VELOCITY targets (MotionUpdate MODE_VELOCITY via LeRobot framework)
 - This means the teleop version must output incremental velocity commands, not absolute poses
-- During INSERT, moderate force (>17N) now triggers SEARCH instead of immediate aggressive recovery
-- SEARCH wiggles in a 5mm radius circle while gently creeping down (~0.002 m/s)
-- If force drops below ~12N during SEARCH, it resumes INSERT (hole likely found)
-- After 3 full circles without success, it falls back to mini-lift RECOVERY
+- During INSERT, force-proportional speed ramp is used (15N→19N maps to 100%→0% speed)
+- Hard safety hold at 19.5N for 0.8s sustained
+- Base insertion speed is 0.008 m/s (vs official's 0.01 m/s)
+- INSERT linear velocity cap is max_linear_vel * 0.5
 - Universal DONE detection monitors actual plug TF and can finish successfully from any phase
 
 ### Known Issues with Current Cheatcode Teleop
-1. ✅ Frame-rate dependent descent - FIXED (now uses dt-based time scaling)
-2. ✅ Insertion descent rate - FIXED (0.01 m/s with force-proportional speed control)
-3. ✅ Recovery lifts too high - FIXED (retreat_height=0.03m, with 5s timeout fallback)
-4. ✅ No fine-alignment dwell - FIXED (ALIGN phase with 1s min dwell, 3mm XY + 0.05rad angular tolerance)
-5. ✅ XY overshoot during approach - FIXED (integrator zeroed during APPROACH phase)
-6. NEW: SEARCH phase replaces aggressive recovery - wiggles in 5mm circle at 2 rad/s when force >17N for 0.3s during insertion
-7. Force thresholds tuned for ~14N normal insertion resistance: rampdown starts at 15N, SEARCH at 17N, RECOVERY at 19N (below 20N penalty zone)
-8. DONE detection uses actual plug TF position (universal check across all phases) with 2s dwell confirmation
+1. ✅ Frame-rate dependent descent - FIXED (uses dt-based time scaling)
+2. ✅ No fine-alignment dwell - FIXED (ALIGN phase with align_min_dwell=2.0s and tighter tolerances)
+3. ✅ XY overshoot during approach - FIXED (integrator zeroed during APPROACH phase)
+4. ✅ Force rampdown tuned: 15N start, 19N full stop, base speed 0.008 m/s — allows robot to push through normal insertion friction (~10-13N)
+5. Note: previous versions used force_rampdown_start=10N, which caused stalling during insertion at normal friction levels
+6. Current behavior intentionally has NO SEARCH phase and NO recovery/retreat phase; insertion either pushes through with rampdown or holds safely on sustained high force
+7. DONE detection uses actual plug TF position (universal check across phases) with 2s dwell confirmation
 
 ## Scoring System (Max 100 per trial, 3 trials)
 

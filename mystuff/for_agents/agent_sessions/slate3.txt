@@ -1,0 +1,47 @@
+# Slate Session 3 - Cheatcode Teleop Robustness Overhaul
+# Date: Current session
+# Goal: Make plug insertion 100% reliable on first try for high-quality training data
+
+## User's Original Prompt
+read everything in here: /home/rocky/ws_aic/src/aic/mystuff/for_agents. i'm on the step of gathering data for training an AI model, however I want to revamp the data collection to make sure plug gets inserted 100% 1st try smoothly and flawlessly, as garbage in, garbage out. I want you also do testing yourself, to actually run the code you changed. the teleop shell command. to run the project you first have to open one terminal, enter docker using @start_docker.sh and in docker use @start_scoring.sh to start the world. the docker will ask you for sudo password. the sudo password is the period sign, "." then, in another terminal, run @teleop.sh to run trials. End goal is to have robust control loop that inserts plug into port smooth and accurate for high quality data.
+
+## Context from Previous Sessions (slate.txt, slate2.txt)
+- Session 1 (slate.txt): Fixed frame-rate dependent descent (60x too fast), retreat height (0.05→0.02m), force thresholds, DONE detection using actual plug TF, horizontal overshoot
+- Session 2 (slate2.txt): Added SEARCH phase (wiggle), tuned force thresholds iteratively (normal insertion ~14N), implemented stall-based SEARCH trigger, ended mid-edit due to quota
+
+## Current State Before Changes (895 lines)
+- State machine: INIT → APPROACH → ALIGN → INSERT → DONE (with SEARCH + RECOVERY)
+- force_rampdown_start=12N (TOO LOW - normal insertion is ~14N)
+- force_rampdown_full=18N
+- force_retreat_threshold=19N
+- search_force_threshold=8N (stall detection min force)
+- search_stall_duration=1.5s
+- hover_height=0.03m
+- insertion_base_speed=0.01 m/s
+- _obs_callback prints on EVERY message (~30Hz) - floods terminal
+
+## Changes Made This Session
+
+### Change 1: Raise force_rampdown_start from 12N → 16N
+**Why**: Normal insertion resistance is ~14N. With rampdown starting at 12N, the robot was already slowing down during normal insertion. This caused artificial stalls. Now the robot pushes through normal resistance at full speed. Only slows if force reaches unusual levels.
+
+### Change 2: Raise force_rampdown_full from 18N → 19N  
+**Why**: Gives more range for proportional slowdown (16-19N = 3N range instead of 12-18N = 6N). The 20N penalty threshold is the hard limit, so we stop just below it.
+
+### Change 3: Throttle debug prints to every 5th observation
+**Why**: At ~30Hz, printing every observation floods the terminal. Every 5th = ~6Hz, still readable but not overwhelming. Full detail still shown for phase transitions.
+
+### Change 4: Lower hover_height from 0.03m → 0.02m
+**Why**: Closer alignment = less drift during initial descent into port. 2cm is enough clearance for alignment.
+
+### Change 5: Reduce insertion_dwell from 2.0s → 1.5s
+**Why**: Faster episode completion for data collection. 1.5s is enough to confirm stable insertion.
+
+### Change 6: Reset stall detection on phase transitions
+**Why**: Stall detection state wasn't always being reset when transitioning between phases, which could cause stale triggers.
+
+### Change 7: Improve SEARCH to use expanding spiral
+**Why**: Fixed-radius circle might miss the port if offset is different from the radius. Expanding spiral covers progressively larger area.
+
+## Testing Log
+(Updated as tests are run)
